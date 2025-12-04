@@ -1,8 +1,8 @@
 import torch
 import torch.nn as nn
 import numpy as np
-from .KANLayer import KANLayer
-# from .fastkan import FastKANLayer
+# from .KANLayer import KANLayer
+from .fastkan import FastKANLayer as KANLayer
 #from .Symbolic_MultKANLayer import *
 from .Symbolic_KANLayer import Symbolic_KANLayer
 from .LBFGS import *
@@ -2472,13 +2472,13 @@ class MultKAN(nn.Module):
 			best_params = None
 			for fun_name in lib:
 				with _model_snapshot(self):  # snapshot-and-restore around each try
-					r2, _, params = self.fix_symbolic(l, i, j, fun_name, fit_params_bool=True, verbose=(verbose>=2), log_history=False)
-					if r2 >= min_r2:
-						results = self.fit(data, opt=optimizer, lr=lr, steps=steps, lamb=lamb)
-						if results['train_loss'][-1] < best_loss:
-							best_loss = results['train_loss'][-1]
-							best_function = fun_name
-							best_params = params
+					r2, _, params = self.fix_symbolic(l, i, j, fun_name, fit_params_bool=False, verbose=(verbose>=2), log_history=False)
+					# if r2 >= min_r2:
+					results = self.fit(data, opt=optimizer, lr=lr, steps=steps, lamb=lamb)
+					if results['train_loss'][-1] < best_loss:
+						best_loss = results['train_loss'][-1]
+						best_function = fun_name
+						best_params = params
 				# self.get_act(self.cache_data)
 
 			# commit winner
@@ -2486,7 +2486,7 @@ class MultKAN(nn.Module):
 				best_function = '0'
 				r2, loss, params = self.fix_symbolic(l, i, j, '0', fit_params_bool=False, verbose=(verbose>=2), log_history=False)
 			else:
-				r2, loss, params = self.fix_symbolic(l, i, j, best_function, given_params=best_params, fit_params_bool=True, verbose=(verbose>=2), log_history=False)
+				r2, loss, params = self.fix_symbolic(l, i, j, best_function, fit_params_bool=False, verbose=(verbose>=2), log_history=False)
 			picks.append({
 				'l': l, 
 				'i': i, 
