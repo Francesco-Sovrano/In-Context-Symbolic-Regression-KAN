@@ -2364,7 +2364,6 @@ class MultKAN(nn.Module):
 		lamb=0,
 		node_th=0, 
 		edge_th=0,
-		min_r2=0,
 	):
 		"""
 		Greedy: at each iteration, fix the single most important numeric B-spline edge.
@@ -2386,52 +2385,71 @@ class MultKAN(nn.Module):
 		# Which layers to consider
 		Ls = range(self.depth) if layers is None else layers
 
-		picks = []
+		# === SCORE ALL CANDIDATE EDGES ===
+		if mode == "backward":
+			# Uses your built-in attribution (fills self.edge_scores per layer: [out_dim, in_dim])
+			self.attribute()
+			layer_scores = [s.detach().clone() for s in self.edge_scores]  # each: (out_dim, in_dim)
+		elif mode == "ols":
+			# Simple surrogate: for each layer, regress numeric pre-subnode sum t_j on numeric per-edge
+			# postacts to get |beta| as importance.
+			layer_scores = []
+			for l in Ls:
+				x_l = self.acts[l]                                        # (N, in_dim)
+				x_num, preacts, postacts_num, _ = self.act_fun[l](x_l)    # postacts_num: (N, out_dim, in_dim)
+				out_dim, in_dim = postacts_num.shape[1], postacts_num.shape[2]
+				scores_l = torch.zeros(out_dim, in_dim, device=device)
+				# mask out edges that are already symbolic or numerically pruned
+				mask_num = (self.act_fun[l].mask > 0)                     # (in_dim, out_dim)
+				mask_sym = (self.symbolic_fun[l].mask > 0)                # (out_dim, in_dim)
 
-		# n_functions = len(Ls)+sum(self.width_in[l] for l in Ls)+sum(self.width_out[l+1] for l in Ls)
-		# for i_fn in range(n_functions):
+				for j in range(out_dim):
+					t = x_num[:, [j]]  # (N,1)
+					F = postacts_num[:, j, :]  # (N, in_dim)
+					# Only numeric, non-symbolic edges are considered
+					keep = (mask_num[:, j] > 0) & (mask_sym[j, :] == 0)
+					if not torch.any(keep):
+						continue
+					Fk = F[:, keep]
+					# ridge-lite for stability
+					lam = 1e-6
+					# beta = (F^T F + lam I)^-1 F^T t
+					A = Fk.T @ Fk + lam * torch.eye(Fk.shape[1], device=device)
+					b = Fk.T @ t
+					beta = torch.linalg.solve(A, b)  # (k,1)
+					scores_l[j, keep] = beta[:, 0].abs() * Fk.std(dim=0)  # scale-aware
+				layer_scores.append(scores_l)
+		else:
+			raise ValueError("mode must be 'backward' or 'ols'")
+
+		# Build list of candidate edges with their scores
+		candidates = []  # list of dicts: {'l', 'i', 'j', 'score'}
+		for l in Ls:
+			scores = layer_scores[l]                          # (out_dim, in_dim)
+			num_mask = (self.act_fun[l].mask > 0).T           # (out_dim, in_dim)
+			sym_off  = (self.symbolic_fun[l].mask == 0)       # (out_dim, in_dim)
+			cand = scores.clone()
+			cand[~num_mask] = -float("inf")
+			cand[~sym_off]  = -float("inf")
+
+			# optional score threshold
+			if min_edge_score is not None:
+				cand[cand < float(min_edge_score)] = -float("inf")
+
+			js, is_ = torch.nonzero(torch.isfinite(cand), as_tuple=True)
+			for j, i in zip(js.tolist(), is_.tolist()):
+				s = float(cand[j, i].item())
+				candidates.append({"l": l, "i": i, "j": j, "score": s})
+
+		if verbose:
+			print(f"[parallel] #candidate edges: {len(candidates)}")
+
+		picks = []
 		i_fn = 0
 		nothing_left = False
 		while not nothing_left:
 			i_fn += 1
 			
-			# === SCORE ALL CANDIDATE EDGES ===
-			if mode == "backward":
-				# Uses your built-in attribution (fills self.edge_scores per layer: [out_dim, in_dim])
-				self.attribute()
-				layer_scores = [s.detach().clone() for s in self.edge_scores]  # each: (out_dim, in_dim)
-			elif mode == "ols":
-				# Simple surrogate: for each layer, regress numeric pre-subnode sum t_j on numeric per-edge
-				# postacts to get |beta| as importance.
-				layer_scores = []
-				for l in Ls:
-					x_l = self.acts[l]                                        # (N, in_dim)
-					x_num, preacts, postacts_num, _ = self.act_fun[l](x_l)    # postacts_num: (N, out_dim, in_dim)
-					out_dim, in_dim = postacts_num.shape[1], postacts_num.shape[2]
-					scores_l = torch.zeros(out_dim, in_dim, device=device)
-					# mask out edges that are already symbolic or numerically pruned
-					mask_num = (self.act_fun[l].mask > 0)                     # (in_dim, out_dim)
-					mask_sym = (self.symbolic_fun[l].mask > 0)                # (out_dim, in_dim)
-
-					for j in range(out_dim):
-						t = x_num[:, [j]]  # (N,1)
-						F = postacts_num[:, j, :]  # (N, in_dim)
-						# Only numeric, non-symbolic edges are considered
-						keep = (mask_num[:, j] > 0) & (mask_sym[j, :] == 0)
-						if not torch.any(keep):
-							continue
-						Fk = F[:, keep]
-						# ridge-lite for stability
-						lam = 1e-6
-						# beta = (F^T F + lam I)^-1 F^T t
-						A = Fk.T @ Fk + lam * torch.eye(Fk.shape[1], device=device)
-						b = Fk.T @ t
-						beta = torch.linalg.solve(A, b)  # (k,1)
-						scores_l[j, keep] = beta[:, 0].abs() * Fk.std(dim=0)  # scale-aware
-					layer_scores.append(scores_l)
-			else:
-				raise ValueError("mode must be 'backward' or 'ols'")
-
 			# === FIND THE SINGLE BEST EDGE (global across layers) ===
 			best = None  # (score, l, i, j)
 			for l in Ls:
@@ -2473,7 +2491,6 @@ class MultKAN(nn.Module):
 			for fun_name in lib:
 				with _model_snapshot(self):  # snapshot-and-restore around each try
 					r2, _, params = self.fix_symbolic(l, i, j, fun_name, fit_params_bool=False, verbose=(verbose>=2), log_history=False)
-					# if r2 >= min_r2:
 					results = self.fit(data, opt=optimizer, lr=lr, steps=steps, lamb=lamb)
 					if results['train_loss'][-1] < best_loss:
 						best_loss = results['train_loss'][-1]
