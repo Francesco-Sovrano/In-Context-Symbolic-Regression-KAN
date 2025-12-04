@@ -82,8 +82,8 @@ torch.manual_seed(0)
 #################################################################
 
 # f = (0.5*x0 + 0.1*x1) + step(x0 - c) * (1.5*x0 + 0.9*x1)
-# f = lambda x: torch.where(x[:,[0]] > 0.6, 2.0 * x[:,[0]] + x[:,[1]], 0.5 * x[:,[0]] + 0.1 * x[:,[1]])
-f = lambda x: 2.0 * x[:,[0]] + x[:,[1]]*x[:,[0]]
+f = lambda x: torch.where(x[:,[0]] > 0.6, 2.0 * x[:,[0]] + x[:,[1]], 0.5 * x[:,[0]] + 0.1 * x[:,[1]])
+# f = lambda x: 2.0 * x[:,[0]] + x[:,[1]]*x[:,[0]]
 f_range=[-1,1]
 dataset = create_dataset(f, n_var=2, ranges=f_range, train_num=2000, test_num=1000)
 
