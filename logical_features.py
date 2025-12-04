@@ -93,7 +93,7 @@ dataset = create_dataset(f, n_var=2, ranges=f_range, train_num=2000, test_num=10
 # Symbolic primitives well-suited for piecewise-linear rules
 ################################################################
 
-LOGICAL_STEEPNESS = 20.0   # sharper than 10, but still differentiable
+LOGICAL_STEEPNESS = 10.0   # sharper than 10, but still differentiable
 
 
 def smooth_step(z, k: float = LOGICAL_STEEPNESS):
@@ -199,8 +199,8 @@ symbolic_formula = None
 while not symbolic_formula or bad_mape(mape) or mape >= MAPE_THRESHOLD:
 	# model
 	model = KAN(
-		width=[2, [5,5], 1], 
-		grid=10, 
+		width=[2, [5,3], 1], 
+		grid=50, 
 		seed=i,
 		grid_range=f_range,
 	)
@@ -223,7 +223,6 @@ while not symbolic_formula or bad_mape(mape) or mape >= MAPE_THRESHOLD:
 		steps=100,
 		lamb=1e-2,
 		node_th=0.5, edge_th=0.1,
-		min_r2=0.9
 	)
 	print('auto_symbolic_robust_greedy:', summary)
 
