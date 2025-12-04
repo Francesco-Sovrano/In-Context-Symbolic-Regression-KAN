@@ -48,6 +48,8 @@ class KANLayer(nn.Module):
         self.in_dim = in_dim = input_dim
         self.num = num = num_grids
         self.k = k
+        self.grid_min = grid_min
+        self.grid_max = grid_max
 
         grid_range=[grid_min, grid_max]
 
@@ -220,7 +222,7 @@ class KANLayer(nn.Module):
         def get_grid(num_interval):
             x_pos = parent.grid[:,parent.k:-parent.k]
             #print('x_pos', x_pos)
-            sp2 = KANLayer(in_dim=1, out_dim=self.in_dim,k=1,num=x_pos.shape[1]-1,scale_base_mu=0.0, scale_base_sigma=0.0).to(x.device)
+            sp2 = KANLayer(input_dim=1, output_dim=self.in_dim, grid_min=self.grid_min, grid_max=self.grid_max, num_grids=x_pos.shape[1]-1, k=1, base_fun=self.base_fun, scale_base_mu=0.0, scale_base_sigma=0.0).to(x.device)
 
             #print('sp2_grid', sp2.grid[:,sp2.k:-sp2.k].permute(1,0).expand(-1,self.in_dim))
             #print('sp2_coef_shape', sp2.coef.shape)
@@ -268,7 +270,7 @@ class KANLayer(nn.Module):
         >>> kanlayer_small.in_dim, kanlayer_small.out_dim
         (2, 3)
         '''
-        spb = KANLayer(len(in_id), len(out_id), self.num, self.k, base_fun=self.base_fun)
+        spb = KANLayer(input_dim=len(in_id), output_dim=len(out_id), grid_min=self.grid_min, grid_max=self.grid_max, num_grids=self.num, k=self.k, base_fun=self.base_fun)
         with torch.no_grad():
             spb.grid.copy_(self.grid[in_id])
             spb.coef.copy_(self.coef[in_id][:, out_id])
