@@ -199,8 +199,8 @@ symbolic_formula = None
 while not symbolic_formula or bad_mape(mape) or mape >= MAPE_THRESHOLD:
 	# model
 	model = KAN(
-		width=[2, [10,5], 1], 
-		grid=20, 
+		width=[2, [5,5], 1], 
+		grid=10, 
 		seed=i,
 		grid_range=f_range,
 	)
@@ -211,7 +211,7 @@ while not symbolic_formula or bad_mape(mape) or mape >= MAPE_THRESHOLD:
 		model = model.prune(node_th=0.1, edge_th=0)
 
 	# model = model.refine(30)
-	model.fit(dataset, opt="Adam", lr=1e-2, steps=2500)
+	model.fit(dataset, opt="Adam", lr=1e-2, steps=5000)
 
 	summary = model.auto_symbolic_robust_greedy(
 		dataset,       # evaluation set
@@ -220,9 +220,9 @@ while not symbolic_formula or bad_mape(mape) or mape >= MAPE_THRESHOLD:
 		mode="backward",
 		weight_simple=0,
 		lr=1e-2,
-		steps=200,
-		lamb=0,
-		# node_th=0.2, edge_th=0,
+		steps=100,
+		lamb=1e-2,
+		node_th=0.5, edge_th=0.1,
 		min_r2=0.9
 	)
 	print('auto_symbolic_robust_greedy:', summary)
