@@ -379,17 +379,19 @@ class GatedSymbolicLayer(nn.Module):
 	Pure symbolic layer with differentiable gating over SYMBOLIC_LIB atoms
 	plus an optional StepBasisFunction atom.
 
-	For each edge (i -> j) and each gate k in `atom_names` (+ optional step atom)
-	we have parameters a_{j,i,k}, b_{j,i,k}, c_{j,i,k}, d_{j,i,k} and compute
+	For each edge (i -> j) and each atom k in `atom_names` (+ optional step atom) we have
+		a_{j,i,k}, b_{j,i,k}, c_{j,i,k}, d_{j,i,k}
+	and compute
+		phi_{j,i,k}(x) = d + c * f_k(a * x + b).
 
-		phi_{j,i,k}(x) = d_{j,i,k} + c_{j,i,k} * f_k(a_{j,i,k} * x + b_{j,i,k}).
-
-	We gate over atoms only (no numeric candidate inside this layer):
-
+	We gate over atoms only (no numeric spline / FastKAN):
 		edge_out(b,j,i) = sum_k softmax(gate_logits[j,i,:])_k * phi_{j,i,k}(pre[b,i])
 
 	Then x_out[b,j] = sum_i edge_out[b,j,i].
 	"""
+	numeric_layers = [
+		"stepbf"
+	]
 
 	def __init__(
 		self,
@@ -399,7 +401,7 @@ class GatedSymbolicLayer(nn.Module):
 		*,
 		init_atom_bias: float = 0.0,
 		symbolic_scale: float = 1.0,
-		# Step basis as an extra gate
+		# NEW: optional StepBasisFunction as an extra atom
 		use_step_basis: bool = False,
 		step_atom_name: str = "stepbf",
 		step_basis_kwargs: Optional[Dict[str, Any]] = None,
@@ -409,7 +411,7 @@ class GatedSymbolicLayer(nn.Module):
 
 		self.in_dim = input_dim
 		self.out_dim = output_dim
-		self.base_atom_names = list(atom_names)          # from SYMBOLIC_LIB
+		self.base_atom_names = list(atom_names)          # atoms from SYMBOLIC_LIB
 		self.symbolic_scale = symbolic_scale
 
 		# Step-basis configuration
@@ -424,11 +426,11 @@ class GatedSymbolicLayer(nn.Module):
 			self.step_basis = None
 			extra_names = []
 
-		# Full list of gates/atoms
+		# Full list of atoms (including optional step atom)
 		self.atom_names = self.base_atom_names + extra_names
-		self.num_gates = self.num_atoms = len(self.atom_names)   # K
+		self.num_atoms = len(self.atom_names)
 
-		# simple LN over inputs
+		# simple LN over inputs for "preacts"
 		self.layernorm = nn.LayerNorm(input_dim)
 
 		# mask [in_dim, out_dim] in KAN convention
@@ -439,18 +441,18 @@ class GatedSymbolicLayer(nn.Module):
 
 		# gate logits: [out_dim, in_dim, K]
 		self.gate_logits = nn.Parameter(
-			torch.zeros(self.out_dim, self.in_dim, self.num_gates)
+			torch.zeros(self.out_dim, self.in_dim, self.num_atoms)
 		)
 		with torch.no_grad():
-			self.gate_logits += init_atom_bias
+			self.gate_logits += init_atom_bias  # typically 0
 
-		# per-edge per-gate affine params: [out_dim, in_dim, K, 4] = (a,b,c,d)
-		if self.num_gates > 0:
+		# per-edge per-atom affine params: [out_dim, in_dim, K, 4] = (a,b,c,d)
+		if self.num_atoms > 0:
 			self.affine = nn.Parameter(
-				torch.zeros(self.out_dim, self.in_dim, self.num_gates, 4)
+				torch.zeros(self.out_dim, self.in_dim, self.num_atoms, 4)
 			)
 			with torch.no_grad():
-				# default = identity-ish for every gate separately
+				# default = identity-ish: a=1, b=0, c=1, d=0
 				self.affine[..., 0] = 1.0  # a
 				self.affine[..., 1] = 0.0  # b
 				self.affine[..., 2] = 1.0  # c
@@ -459,18 +461,22 @@ class GatedSymbolicLayer(nn.Module):
 			self.affine = None
 
 		# --- fake KAN-style meta fields so MultKAN doesn't break ---
+		# Out "sum" and "mult" node counts (this layer has no internal mult nodes)
 		self.out_dim_sum = output_dim
 		self.out_dim_mult = 0
 
+		# dummy "grid" & k so things like refine()/plot don't crash
 		self.grid = nn.Parameter(
 			torch.linspace(-1.0, 1.0, 2),
 			requires_grad=False
 		)
 		self.k = 3
 
+		# scale_* used in their reg() / plotting
 		self.scale_base = nn.Parameter(torch.ones(output_dim))
 		self.scale_sp   = nn.Parameter(torch.ones(output_dim))
 
+		# dummy spline coeffs, just to satisfy coef-based regularizer
 		self._dummy_coef = nn.Parameter(
 			torch.zeros(self.out_dim * self.in_dim, 1),
 			requires_grad=False
@@ -481,14 +487,20 @@ class GatedSymbolicLayer(nn.Module):
 	# ------------------------------------------------------------------
 	@property
 	def coef(self) -> torch.Tensor:
+		"""
+		Dummy coefficient tensor just so reg() doesn't blow up.
+		Shape [num_edges, num_grids]. We don't actually use spline grids here.
+		"""
 		return self._dummy_coef
 
 	@torch.no_grad()
 	def update_grid_from_samples(self, acts: torch.Tensor):
+		# Pure symbolic layer: nothing to update.
 		return
 
 	@torch.no_grad()
 	def initialize_grid_from_parent(self, parent_layer, parent_acts: torch.Tensor):
+		# Again: nothing to copy for a spline grid.
 		return
 
 	# ------------------------------------------------------------------
@@ -499,12 +511,12 @@ class GatedSymbolicLayer(nn.Module):
 		pre: [B, in_dim]
 
 		Returns:
-		  sym_vals: [B, out_dim, in_dim, K]
-			= phi_{j,i,k}(pre[:,i]) for all edges and gates.
+		  sym_vals: [B, out_dim, in_dim, num_atoms]
+			= phi_{j,i,k}(pre[:,i]) for all edges and atoms.
 		"""
 		B, I = pre.shape
 		O = self.out_dim
-		K = self.num_gates
+		K = self.num_atoms
 		device = pre.device
 
 		if K == 0:
@@ -512,29 +524,30 @@ class GatedSymbolicLayer(nn.Module):
 
 		pre_exp = pre[:, None, :, None]   # [B,1,I,1]
 
-		sym_vals = torch.zeros(B, O, I, K, device=device)
+		a = self.affine[..., 0]  # [O,I,K]
+		b = self.affine[..., 1]
+		c = self.affine[..., 2]
+		d = self.affine[..., 3]
+
+		a_b = a.unsqueeze(0)     # [1,O,I,K]
+		b_b = b.unsqueeze(0)
+		c_b = c.unsqueeze(0)
+		d_b = d.unsqueeze(0)
+
+		arg = a_b * pre_exp + b_b       # [B,O,I,K]
+		sym_vals = torch.zeros_like(arg)
 
 		for k_idx, name in enumerate(self.atom_names):
-			# Extract gate-specific affine parameters: [O,I]
-			a_k = self.affine[..., k_idx, 0]  # [O,I]
-			b_k = self.affine[..., k_idx, 1]
-			c_k = self.affine[..., k_idx, 2]
-			d_k = self.affine[..., k_idx, 3]
+			arg_k = arg[..., k_idx]     # [B,O,I]
 
-			a_k_b = a_k.unsqueeze(0)         # [1,O,I]
-			b_k_b = b_k.unsqueeze(0)         # [1,O,I]
-			c_k_b = c_k.unsqueeze(0)         # [1,O,I]
-			d_k_b = d_k.unsqueeze(0)         # [1,O,I]
-
-			# gate-specific argument
-			arg_k = a_k_b * pre_exp.squeeze(-1) + b_k_b   # [B,O,I]
-
-			# compute f_k
 			if self.use_step_basis and name == self.step_atom_name:
+				# --- StepBasisFunction atom ---
 				# StepBasisFunction: x [..., I] -> [..., I, G]
+				# Here arg_k has shape [B,O,I] so output is [B,O,I,G].
 				sb = self.step_basis(arg_k)      # [B,O,I,G]
-				v = sb.mean(dim=-1)              # [B,O,I]
+				v = sb.mean(dim=-1)             # reduce over grid -> [B,O,I]
 			else:
+				# standard SYMBOLIC_LIB atom
 				torch_fun = SYMBOLIC_LIB[name][0]
 
 				# crude domain fixes for logs/sqrts
@@ -545,23 +558,26 @@ class GatedSymbolicLayer(nn.Module):
 				else:
 					arg_local = arg_k
 
-				v = torch_fun(arg_local)         # broadcast
+				v = torch_fun(arg_local)  # expects broadcasting
+
+				# ensure [B,O,I]
 				while v.ndim < 3:
 					v = v.unsqueeze(-1)
 				v = v.reshape(B, O, I)
 
 			v = torch.nan_to_num(v, nan=0.0, posinf=1e3, neginf=-1e3)
 
-			# phi_{j,i,k}(x) = d_k + c_k * v_k
-			phi_k = d_k_b + c_k_b * v          # [B,O,I]
-			sym_vals[..., k_idx] = phi_k
+			c_k = c_b[..., k_idx]       # [1,O,I]
+			d_k = d_b[..., k_idx]
+
+			sym_vals[..., k_idx] = d_k + c_k * v
 
 		sym_vals = torch.nan_to_num(sym_vals, nan=0.0, posinf=1e3, neginf=-1e3)
 		sym_vals = self.symbolic_scale * sym_vals
 		return sym_vals   # [B,O,I,K]
 
 	# ------------------------------------------------------------------
-	# forward (gating over K gates)
+	# forward: KAN-compatible signature
 	# ------------------------------------------------------------------
 	def forward(
 		self,
@@ -569,6 +585,15 @@ class GatedSymbolicLayer(nn.Module):
 		time_benchmark: bool = True,
 		temperature: Optional[float] = None,
 	):
+		"""
+		x: [B, in_dim]
+
+		Returns:
+		  x_out            : [B, out_dim]
+		  preacts          : [B, out_dim, in_dim]
+		  postacts_mixed   : [B, out_dim, in_dim]  (gated per-edge output)
+		  postspline_dummy : [B, out_dim, in_dim]  (same as postacts_mixed)
+		"""
 		if temperature is None:
 			temperature = 1.0
 
@@ -579,15 +604,16 @@ class GatedSymbolicLayer(nn.Module):
 
 		B, I = pre.shape
 		O = self.out_dim
-		K = self.num_gates
+		K = self.num_atoms
 		device = x.device
 
+		# preacts: broadcast pre per output
 		preacts = pre.unsqueeze(1).expand(B, O, I)    # [B,O,I]
 
-		# 1) symbolic candidates per-edge, per-gate
+		# 1) symbolic candidates per-edge
 		sym_vals = self._symbolic_vals(pre)          # [B,O,I,K]
 
-		# 2) gating over gates k
+		# 2) gating over atoms
 		if K == 0:
 			edge_out = torch.zeros(B, O, I, device=device)
 		else:
@@ -601,7 +627,9 @@ class GatedSymbolicLayer(nn.Module):
 
 		x_out = edge_out.sum(dim=-1)                         # [B,O]
 
-		postspline = edge_out  # KAN compatibility
+		# For KAN compatibility, we return edge_out twice
+		postspline = edge_out
+
 		return x_out, preacts, edge_out, postspline
 
 	# ------------------------------------------------------------------
