@@ -104,11 +104,11 @@ def check_gates(model):
 				c_active = int(((best == k_idx) & active).sum().item())
 				print(f"{name:>8}  {mp:10.6f}  {c_all:13d}  {c_active:15d}")
 
-
-for _ in range(5):
+gate_top_k = 6
+for i in range(3):
 	# train the model
 	model.fit(dataset, opt="Adam", lr=1e-2, steps=500, lamb=1e-2);
-	model = model.prune(node_th=0.1, edge_th=0.1, gate_top_k=3)
+	model = model.prune(node_th=0.1, edge_th=0, gate_top_k=max(gate_top_k-i,3))
 	# check_gates(model)
 # model.prune_symbolic_gates_topk(k=3)
 
