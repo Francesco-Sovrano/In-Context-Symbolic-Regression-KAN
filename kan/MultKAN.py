@@ -1328,7 +1328,7 @@ class MultKAN(nn.Module):
 		for l, vec in enumerate(acts_scale):
 			# vec: [out_dim, in_dim]
 			# Clean up NaN/inf right away
-			vec = torch.nan_to_num(vec, nan=0.0, posinf=0.0, neginf=0.0)
+			# vec = torch.nan_to_num(vec, nan=0.0, posinf=0.0, neginf=0.0)
 			vec = vec.abs()
 
 			if vec.numel() == 0:
@@ -1368,9 +1368,9 @@ class MultKAN(nn.Module):
 
 			p_col = torch.clamp(p_col, min=1e-4, max=1.0)
 
-			# final safety: kill any NaNs that might sneak in
-			p_row = torch.nan_to_num(p_row, nan=1e-4, posinf=1.0, neginf=1e-4)
-			p_col = torch.nan_to_num(p_col, nan=1e-4, posinf=1.0, neginf=1e-4)
+			# # final safety: kill any NaNs that might sneak in
+			# p_row = torch.nan_to_num(p_row, nan=1e-4, posinf=1.0, neginf=1e-4)
+			# p_col = torch.nan_to_num(p_col, nan=1e-4, posinf=1.0, neginf=1e-4)
 
 			entropy_row = - torch.mean(torch.sum(p_row * torch.log2(p_row), dim=1))
 			entropy_col = - torch.mean(torch.sum(p_col * torch.log2(p_col), dim=0))
@@ -1398,7 +1398,7 @@ class MultKAN(nn.Module):
 			if coef.numel() == 0:
 				continue
 
-			coef = torch.nan_to_num(coef, nan=0.0, posinf=0.0, neginf=0.0)
+			# coef = torch.nan_to_num(coef, nan=0.0, posinf=0.0, neginf=0.0)
 
 			coeff_l1 = torch.sum(torch.mean(torch.abs(coef), dim=1))
 			if coef.shape[1] > 1:
@@ -1496,8 +1496,7 @@ class MultKAN(nn.Module):
 				self.attribute()
 			if reg_metric == 'node_backward':
 				self.node_attribute()
-			r = self.get_reg(reg_metric, lamb_l1, lamb_entropy,
-							 lamb_coef, lamb_coefdiff, reg_type=reg_type)
+			r = self.get_reg(reg_metric, lamb_l1, lamb_entropy, lamb_coef, lamb_coefdiff, reg_type=reg_type)
 
 			# NEW: add gating regularizer for all GatedSymbolicLayer layers
 			if gating_entropy != 0.0 or gating_l1 != 0.0:
@@ -1858,44 +1857,29 @@ class MultKAN(nn.Module):
 			self.log_history('prune_edge')
 	
 	def prune(self, node_th=1e-2, edge_th=0):
-		'''
-		prune (both nodes and edges)
-
-		Args:
-		-----
-			node_th : float
-				if the attribution score of a node is below node_th, it is considered dead and will be set to zero.
-			edge_th : float
-				if the attribution score of an edge is below edge_th, it is considered dead and will be set to zero.
-			
-		Returns:
-		--------
-			pruned network : MultKAN
-		'''
 		if self.acts is None:
 			self.get_act()
 		
 		# 1) node pruning
+		model = self
 		if node_th:
-			self = self.prune_node(node_th, log_history=False)
+			model = model.prune_node(node_th, log_history=False)
 
-		# refresh activations / scores for edge pruning
-		self.forward(self.cache_data)
-		self.attribute()
+		model.forward(model.cache_data)
+		model.attribute()
 
-		# 2) edge pruning
 		if edge_th:
-			self.prune_edge(edge_th, log_history=False)
+			model.prune_edge(edge_th, log_history=False)
 
 		# --- NEW: sanity check that something is left ---
-		if self.n_edge == 0:
+		if model.n_edge == 0:
 			raise RuntimeError(
 				"prune() removed all active edges; model is now empty. "
 				"Try using smaller node_th / edge_th, or disable pruning here."
 			)
 
-		self.log_history('prune')
-		return self
+		model.log_history('prune')
+		return model
 	
 	def prune_input(self, threshold=1e-2, active_inputs=None, log_history=True):
 		'''
@@ -2290,7 +2274,7 @@ class MultKAN(nn.Module):
 		layers=None,                # None = all layers; or list[int]
 		mode="backward",            # "backward" (uses self.attribute) or "ols" surrogate
 		weight_simple = 0,
-		verbose=1,                  # 0 quiet, 1 picks only, 2 + details from suggest_symbolic
+		verbose=1,                   # 0 quiet, 1 picks only, 2 + details from suggest_symbolic
 		lr=1e-3,
 		steps=200,
 		lamb=0,
@@ -2298,9 +2282,8 @@ class MultKAN(nn.Module):
 		edge_th=0,
 	):
 		"""
-		Greedy: at each iteration, fix the single most important *numeric* B-spline
-		edge, but only on nodes that are still purely numeric (no symbolic incoming
-		edges yet).
+		Greedy: at each iteration, fix the single most important numeric B-spline edge.
+		Importance defaults to the model's own backward attribution (fast and stable).
 
 		Returns:
 			picks: list of dicts like
@@ -2316,10 +2299,7 @@ class MultKAN(nn.Module):
 			lib = [k for k in SYMBOLIC_LIB.keys() if k != '0']
 
 		# Which layers to consider
-		if layers is None:
-			Ls = list(range(self.depth))
-		else:
-			Ls = list(layers)
+		Ls = range(self.depth) if layers is None else layers
 
 		# === SCORE ALL CANDIDATE EDGES ===
 		if mode == "backward":
@@ -2327,37 +2307,29 @@ class MultKAN(nn.Module):
 			self.attribute()
 			layer_scores = [s.detach().clone() for s in self.edge_scores]  # each: (out_dim, in_dim)
 		elif mode == "ols":
-			# Simple surrogate: for each layer, regress numeric pre-subnode sum t_j
-			# on numeric per-edge postacts to get |beta| as importance.
+			# Simple surrogate: for each layer, regress numeric pre-subnode sum t_j on numeric per-edge
+			# postacts to get |beta| as importance.
 			layer_scores = []
 			for l in Ls:
 				x_l = self.acts[l]                                        # (N, in_dim)
 				x_num, preacts, postacts_num, _ = self.act_fun[l](x_l)    # postacts_num: (N, out_dim, in_dim)
 				out_dim, in_dim = postacts_num.shape[1], postacts_num.shape[2]
 				scores_l = torch.zeros(out_dim, in_dim, device=device)
-
-				# masks
+				# mask out edges that are already symbolic or numerically pruned
 				mask_num = (self.act_fun[l].mask > 0)                     # (in_dim, out_dim)
 				mask_sym = (self.symbolic_fun[l].mask > 0)                # (out_dim, in_dim)
 
-				# node-level: only nodes with NO symbolic edges are "numeric nodes"
-				node_is_numeric = (mask_sym.sum(dim=1) == 0)              # (out_dim,)
-
 				for j in range(out_dim):
-					if not node_is_numeric[j]:
-						continue  # skip nodes that already have some symbolic edges
-
-					t = x_num[:, [j]]              # (N,1)
-					F = postacts_num[:, j, :]      # (N, in_dim)
-
+					t = x_num[:, [j]]  # (N,1)
+					F = postacts_num[:, j, :]  # (N, in_dim)
 					# Only numeric, non-symbolic edges are considered
 					keep = (mask_num[:, j] > 0) & (mask_sym[j, :] == 0)
 					if not torch.any(keep):
 						continue
-
 					Fk = F[:, keep]
 					# ridge-lite for stability
 					lam = 1e-6
+					# beta = (F^T F + lam I)^-1 F^T t
 					A = Fk.T @ Fk + lam * torch.eye(Fk.shape[1], device=device)
 					b = Fk.T @ t
 					beta = torch.linalg.solve(A, b)  # (k,1)
@@ -2370,18 +2342,8 @@ class MultKAN(nn.Module):
 		candidates = []  # list of dicts: {'l', 'i', 'j', 'score'}
 		for l in Ls:
 			scores = layer_scores[l]                          # (out_dim, in_dim)
-
-			# masks
-			num_mask_raw = (self.act_fun[l].mask > 0)         # (in_dim, out_dim)
-			num_mask = num_mask_raw.T                         # (out_dim, in_dim)
-			sym_mask = self.symbolic_fun[l].mask              # (out_dim, in_dim)
-
-			# node-level numeric condition: entire node has no symbolic edges
-			node_is_numeric = (sym_mask.sum(dim=1, keepdim=True) == 0)  # (out_dim, 1)
-
-			# edge must (a) be numeric and (b) lie on a numeric node and (c) itself not be symbolic
-			sym_off = (sym_mask == 0) & node_is_numeric       # (out_dim, in_dim)
-
+			num_mask = (self.act_fun[l].mask > 0).T           # (out_dim, in_dim)
+			sym_off  = (self.symbolic_fun[l].mask == 0)       # (out_dim, in_dim)
 			cand = scores.clone()
 			cand[~num_mask] = -float("inf")
 			cand[~sym_off]  = -float("inf")
@@ -2396,7 +2358,7 @@ class MultKAN(nn.Module):
 				candidates.append({"l": l, "i": i, "j": j, "score": s})
 
 		if verbose:
-			print(f"[parallel] #candidate numeric edges (on numeric nodes): {len(candidates)}")
+			print(f"[parallel] #candidate edges: {len(candidates)}")
 
 		picks = []
 		i_fn = 0
@@ -2408,13 +2370,10 @@ class MultKAN(nn.Module):
 			best = None  # (score, l, i, j)
 			for l in Ls:
 				scores = layer_scores[l]                       # (out_dim, in_dim)
-
-				num_mask_raw = (self.act_fun[l].mask > 0)      # (in_dim, out_dim)
-				num_mask = num_mask_raw.T                      # (out_dim, in_dim)
-				sym_mask = self.symbolic_fun[l].mask           # (out_dim, in_dim)
-				node_is_numeric = (sym_mask.sum(dim=1, keepdim=True) == 0)  # (out_dim, 1)
-				sym_off = (sym_mask == 0) & node_is_numeric    # (out_dim, in_dim)
-
+				# numeric candidates only
+				num_mask = (self.act_fun[l].mask > 0).T        # (out_dim, in_dim)
+				# not already symbolic
+				sym_off  = (self.symbolic_fun[l].mask == 0)    # (out_dim, in_dim)
 				cand = scores.clone()
 				cand[~num_mask] = -float("inf")
 				cand[~sym_off]  = -float("inf")
@@ -2423,36 +2382,69 @@ class MultKAN(nn.Module):
 				if min_edge_score is not None:
 					cand[cand < float(min_edge_score)] = -float("inf")
 
+				# pick best (i.e., least important) in this layer
 				val = torch.max(cand)
 				if torch.isfinite(val):
 					j, i = torch.nonzero(cand == val, as_tuple=False)[0]  # first argmax
+					if isinstance(l, GatedSymbolicLayer):
+						edge_choices = l.get_symbolic_choices()
+						if edge_choices[(j, i)] not in GatedSymbolicLayer.numeric_layers:
+							continue
 					s = float(val.item())
 					if (best is None) or (s > best[0]):
 						best = (s, l, int(i.item()), int(j.item()))
 
 			if best is None:
 				if verbose >= 1:
-					print("[greedy] No eligible numeric edges/nodes remain (or below threshold). Stop.")
+					print("[greedy] No eligible numeric edges remain (or below threshold). Stop.")
 				nothing_left = True
 				break
 
 			score, l, i, j = best
 
 			if verbose >= 1:
-				print(f"[greedy] step {i_fn}: pick numeric edge (l={l}, i={i}, j={j}) with score={score:.3e} (mode={mode})")
+				print(f"[greedy] step {i_fn}: pick edge (l={l}, i={i}, j={j}) with score={score:.3e} (mode={mode})")
+
+			# if isinstance(self.act_fun[l], GatedSymbolicLayer):
+			# 	gate_layer = self.act_fun[l]
+			# 	logits_edge = gate_layer.gate_logits[j, i]
+			# 	probs_edge  = torch.softmax(logits_edge, dim=-1)
+			# 	p_numeric = probs_edge[0].item()
+			# 	p_best_symbolic = probs_edge[1:].max().item() if gate_layer.num_atoms > 0 else 0.0
+
+			# 	# Example heuristic: only bother with symbolic if best atom beats numeric
+			# 	if p_best_symbolic <= p_numeric:
+			# 		if verbose >= 1:
+			# 			print(f"[greedy] skip edge (l={l},i={i},j={j}) – gating prefers numeric ({p_numeric:.2f} vs {p_best_symbolic:.2f})")
+			# 		# Mark this edge as "done" by zeroing its score and continue
+			# 		layer_scores[l][j, i] = -float("inf")
+			# 		continue
+
 
 			best_function = None
 			best_loss = float('inf')
 			best_params = None
+			# for fun_name in lib:
+			# 	with _model_snapshot(self):  # snapshot-and-restore around each try
+			# 		r2, _, params = self.fix_symbolic(l, i, j, fun_name, fit_params_bool=False, verbose=(verbose>=2), log_history=False)
+			# 		results = self.fit(data, opt=optimizer, lr=lr, steps=steps, lamb=lamb)
+			# 		if results['train_loss'][-1] < best_loss:
+			# 			best_loss = results['train_loss'][-1]
+			# 			best_function = fun_name
+			# 			best_params = params
+			# 	# self.get_act(self.cache_data)
 
-			# --- build edge-specific library ordering using *symbolic* gating, if available ---
-			if isinstance(self.symbolic_fun[l], GatedSymbolicLayer):
-				gate_layer = self.symbolic_fun[l]
-				# logits for this edge (out=j, in=i): [K] for K symbolic atoms
+			# --- build edge-specific library ordering using gating ---
+			if isinstance(self.act_fun[l], GatedSymbolicLayer):
+				gate_layer = self.act_fun[l]
+				# logits for this edge (out=j, in=i): [K+1]
 				logits_edge = gate_layer.gate_logits[j, i]
-				probs_edge  = torch.softmax(logits_edge, dim=-1)  # [K]
+				probs_edge  = torch.softmax(logits_edge, dim=-1)
 
-				atom_order = torch.argsort(probs_edge, descending=True).tolist()
+				K = gate_layer.num_atoms
+				# probs for symbolic atoms only (exclude numeric index 0)
+				atom_probs = probs_edge[1:1+K]                 # [K]
+				atom_order = torch.argsort(atom_probs, descending=True).tolist()
 
 				# Build a gated ordering of names that also exist in 'lib'
 				gated_lib = []
@@ -2465,7 +2457,7 @@ class MultKAN(nn.Module):
 				TOP_K_PER_EDGE = 3
 				gated_lib = gated_lib[:TOP_K_PER_EDGE]
 
-				# Add remaining lib entries (atoms not in gated_lib)
+				# Add remaining lib entries (e.g., '0' or atoms not in atom_names)
 				lib_edge = gated_lib + [name for name in lib if name not in gated_lib]
 			else:
 				# fall back to global lib
@@ -2486,23 +2478,12 @@ class MultKAN(nn.Module):
 						best_function = fun_name
 						best_params = params
 
-			# commit winner (still only on this numeric edge / numeric node)
+			# commit winner
 			if not best_function:
 				best_function = '0'
-				r2, loss, params = self.fix_symbolic(
-					l, i, j, '0',
-					fit_params_bool=False,
-					verbose=(verbose >= 2),
-					log_history=False
-				)
+				r2, loss, params = self.fix_symbolic(l, i, j, '0', fit_params_bool=False, verbose=(verbose>=2), log_history=False)
 			else:
-				r2, loss, params = self.fix_symbolic(
-					l, i, j, best_function,
-					fit_params_bool=False,
-					verbose=(verbose >= 2),
-					log_history=False
-				)
-
+				r2, loss, params = self.fix_symbolic(l, i, j, best_function, fit_params_bool=False, verbose=(verbose>=2), log_history=False)
 			picks.append({
 				'l': l, 
 				'i': i, 
@@ -2513,22 +2494,16 @@ class MultKAN(nn.Module):
 				'r2': float(r2) if r2 is not None else None, 
 				'score': score
 			})
-
-			# re-fit after committing the best symbolic choice on this edge
 			self.fit(data, opt=optimizer, lr=lr, steps=steps, lamb=lamb)
-
 			if node_th or edge_th:
-				self.prune(node_th=node_th, edge_th=edge_th)
-
-			# (optional) you can refresh acts / scores here if you want up-to-date attributions
-			# self.get_act(self.cache_data)
-			# self.attribute()
-			# layer_scores = [s.detach().clone() for s in self.edge_scores]
+				self = self.prune(node_th=node_th, edge_th=edge_th)
+			# # # # Forward once per iteration to refresh acts/scales on the current model
+			# # # self.get_act(self.cache_data)
 
 		# housekeeping
 		self.log_history('auto_symbolic_robust_greedy')
+		# self.save_act = save_before
 		return picks
-
 
 	def symbolic_formula(self, var=None, normalizer=None, output_normalizer=None, simplify=False):
 		symbolic_acts = []
@@ -2542,7 +2517,6 @@ class MultKAN(nn.Module):
 					ex2 = ex2.subs(a, round(a, n_digit))
 			return ex2
 
-		# -------- inputs as sympy symbols --------
 		if var is None:
 			for ii in range(1, self.width[0][0] + 1):
 				x.append(sympy.Symbol(f'x_{ii}'))
@@ -2551,9 +2525,8 @@ class MultKAN(nn.Module):
 		else:
 			x = [sympy.symbols(var_) for var_ in var]
 
-		x0 = x  # original variables
+		x0 = x
 
-		# optional input normalization
 		if normalizer is not None:
 			mean = [SymFloat(float(m)) for m in normalizer[0]]
 			std  = [SymFloat(float(s)) if float(s) != 0 else SymFloat(1.0) for s in normalizer[1]]
@@ -2567,84 +2540,41 @@ class MultKAN(nn.Module):
 				fv = 0.0
 			return SymFloat(fv)
 
-		# -------- go layer by layer --------
 		for l in range(len(self.width_in) - 1):
-			num_sum  = self.width[l + 1][0]
+			num_sum = self.width[l + 1][0]
 			num_mult = self.width[l + 1][1]
 
-			layer = self.act_fun[l]
-
-			# operation type per subnode
-			if hasattr(layer, "get_op_choice"):
-				op_types = layer.get_op_choice(hard=True)
+			# get op type per subnode if using KANLayer, else default to "add"
+			if hasattr(self.act_fun[l], "get_op_choice"):
+				op_types = self.act_fun[l].get_op_choice(hard=True)
 			else:
-				op_types = ["add"] * self.width_out[l + 1]
+				op_types = ["add"] * self.width_out[l+1]
 
 			y = []
-
 			for j in range(self.width_out[l + 1]):
 				op = op_types[j] if j < len(op_types) else "add"
 
+				# initialize according to op
 				if op == "mul":
 					yj = SymFloat(1.0)
 				else:
 					yj = SymFloat(0.0)
 
 				for i in range(self.width_in[l]):
-					# skip pruned edges
-					if hasattr(layer, "mask") and layer.mask[i, j].item() <= 0:
-						continue
+					a, b, c, d = [ _sf(v) for v in self.symbolic_fun[l].affine[j, i] ]
+					sympy_fun = self.symbolic_fun[l].funs_sympy[j][i]
 
-					# --------------------------------------------------
-					# CASE 1: our new GatedSymbolicLayer
-					# --------------------------------------------------
-					if isinstance(layer, GatedSymbolicLayer):
-						if layer.num_atoms == 0:
-							continue
+					term = d
+					# guard tiny scales for stability
+					if abs(float(c)) > 1e-12:
+						arg = a * x[i] + b
+						try:
+							val = sympy_fun(arg)
+						except Exception as e:
+							print('Error in symbolic edge (l,i,j):', l, i, j, e)
+							return
+						term = term + c * val
 
-						# best atom for this edge (j,i)
-						logits_ij = layer.gate_logits[j, i]      # [K]
-						best_idx = int(torch.argmax(logits_ij).item())
-						atom_name = layer.atom_names[best_idx]
-						sympy_fun = SYMBOLIC_LIB[atom_name][1]  # sympy version
-
-						# a,b,c,d for this edge & atom
-						a_val, b_val, c_val, d_val = [
-							_sf(layer.affine[j, i, best_idx, k]) for k in range(4)
-						]
-
-						term = d_val
-						if abs(float(c_val)) > 1e-12:
-							arg = a_val * x[i] + b_val
-							try:
-								val = sympy_fun(arg)
-							except Exception as e:
-								# if some weird singularity happens, just skip this edge
-								print(f"symbolic_formula: error in (l={l}, i={i}, j={j}, atom={atom_name}): {e}")
-								val = 0
-							term = term + c_val * val
-
-					# --------------------------------------------------
-					# CASE 2: old Symbolic_KANLayer branch (if you still use it)
-					# --------------------------------------------------
-					else:
-						a_val, b_val, c_val, d_val = [
-							_sf(self.symbolic_fun[l].affine[j, i, k])
-							for k in range(4)
-						]
-						sympy_fun = self.symbolic_fun[l].funs_sympy[j][i]
-
-						term = d_val
-						if abs(float(c_val)) > 1e-12:
-							arg = a_val * x[i] + b_val
-							try:
-								val = sympy_fun(arg)
-							except Exception as e:
-								print('Error in symbolic edge (l,i,j):', l, i, j, e)
-								val = 0
-							term = term + c_val * val
-
-					# combine into neuron j
 					if op == "mul":
 						yj = yj * term
 					else:
@@ -2657,22 +2587,26 @@ class MultKAN(nn.Module):
 					try:
 						with time_limit(getattr(self, "simplify_timeout", 10.0)):
 							if not yj.has(sympy.zoo, sympy.oo, -sympy.oo, sympy.nan):
-								yj = sympy.simplify(yj, ratio=1.4)
+								y.append(sympy.simplify(yj, ratio=1.4))
+							else:
+								y.append(yj)
 					except SimplifyTimeout:
-						pass
-
-				y.append(yj)
+						print(f"Simplify timed out for subnode {j}; using unsimplified yj.")
+						y.append(yj)
+				else:
+					y.append(yj)
 
 			symbolic_acts_premult.append(y)
 
-			# -------- multiplication nodes (same as before) --------
+			# your existing multiplication-node logic (if you still use mult_arity) can remain;
+			# here I'm assuming you keep that as-is:
 			mult = []
 			offset = num_sum
 			for k in range(num_mult):
 				if isinstance(self.mult_arity, int):
 					ar = self.mult_arity
 				else:
-					ar = self.mult_arity[l + 1][k]
+					ar = self.mult_arity[l+1][k]
 				mult_k = y[offset]
 				for t in range(1, ar):
 					mult_k = mult_k * y[offset + t]
@@ -2682,34 +2616,25 @@ class MultKAN(nn.Module):
 			y = y[:num_sum] + mult
 
 			# node affine
-			for j in range(self.width_in[l + 1]):
+			for j in range(self.width_in[l+1]):
 				y[j] = self.node_scale[l][j] * y[j] + self.node_bias[l][j]
 
 			x = y
 			symbolic_acts.append(x)
 
-		# -------- optional output de-normalization --------
 		if output_normalizer is not None:
 			output_layer = symbolic_acts[-1]
-			means, stds = output_normalizer
-			assert len(output_layer) == len(means) == len(stds)
-			output_layer = [
-				output_layer[i] * stds[i] + means[i] for i in range(len(output_layer))
-			]
+			means = output_normalizer[0]
+			stds = output_normalizer[1]
+			assert len(output_layer) == len(means)
+			assert len(output_layer) == len(stds)
+			output_layer = [(output_layer[i] * stds[i] + means[i]) for i in range(len(output_layer))]
 			symbolic_acts[-1] = output_layer
 
-		self.symbolic_acts = [
-			[symbolic_acts[l][i] for i in range(len(symbolic_acts[l]))]
-			for l in range(len(symbolic_acts))
-		]
-		self.symbolic_acts_premult = [
-			[symbolic_acts_premult[l][i] for i in range(len(symbolic_acts_premult[l]))]
-			for l in range(len(symbolic_acts_premult))
-		]
+		self.symbolic_acts = [[symbolic_acts[l][i] for i in range(len(symbolic_acts[l]))] for l in range(len(symbolic_acts))]
+		self.symbolic_acts_premult = [[symbolic_acts_premult[l][i] for i in range(len(symbolic_acts_premult[l]))] for l in range(len(symbolic_acts_premult))]
 
 		return [symbolic_acts[-1][i] for i in range(len(symbolic_acts[-1]))], x0
-
-
 		
 	def expand_depth(self):
 		'''
