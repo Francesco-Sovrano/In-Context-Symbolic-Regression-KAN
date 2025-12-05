@@ -100,7 +100,8 @@ def time_limit(seconds: float):
 
 
 class MultKAN(nn.Module):
-	def __init__(self, width=None, grid=3, k=3, mult_arity = 2, noise_scale=0.3, scale_base_mu=0.0, scale_base_sigma=1.0, base_fun='silu', affine_trainable=False, grid_eps=0.02, grid_range=[-1, 1], sp_trainable=True, sb_trainable=True, seed=1, save_act=True, sparse_init=False, auto_save=True, first_init=True, ckpt_path='./model', state_id=0, round=0, device='cpu', atom_names=None):
+	def __init__(self, width=None, grid=3, k=3, mult_arity = 2, noise_scale=0.3, scale_base_mu=0.0, scale_base_sigma=1.0, base_fun='silu', affine_trainable=False, grid_eps=0.02, grid_range=[-1, 1], sp_trainable=True, sb_trainable=True, seed=1, save_act=True, sparse_init=False, auto_save=True, first_init=True, ckpt_path='./model', state_id=0, round=0, device='cpu', atom_names=None, spline_weight_init_scale=0.01, numeric_atom_configs=None):
+
 		super(MultKAN, self).__init__()
 
 		torch.manual_seed(seed)
@@ -146,6 +147,8 @@ class MultKAN(nn.Module):
 		self.grid_range = grid_range
 
 		self.atom_names = atom_names
+		self.spline_weight_init_scale = spline_weight_init_scale
+		self.numeric_atom_configs = numeric_atom_configs
 			
 		
 		for l in range(self.depth):
@@ -168,18 +171,14 @@ class MultKAN(nn.Module):
 					grid_max=self.grid_range[1],
 					num_grids=grid_l,
 					# use_base_update=False,
-					spline_weight_init_scale=0.1,
+					spline_weight_init_scale=self.spline_weight_init_scale,
 				)
 			else:
 				sp_batch = GatedSymbolicLayer(
 					input_dim=width_in[l],
 					output_dim=width_out[l+1],
 					atom_names=self.atom_names,
-					grid_min=self.grid_range[0],
-					grid_max=self.grid_range[1],
-					num_grids=grid_l,
-					# use_base_update=False,
-					spline_weight_init_scale=0.1,
+					numeric_atom_configs=self.numeric_atom_configs,
 				)
 
 			# sp_batch = KANLayer(in_dim=width_in[l], out_dim=width_out[l+1], num=grid_l, k=k_l, noise_scale=noise_scale, scale_base_mu=scale_base_mu, scale_base_sigma=scale_base_sigma, scale_sp=1., base_fun=base_fun, grid_eps=grid_eps, grid_range=grid_range, sp_trainable=sp_trainable, sb_trainable=sb_trainable, sparse_init=sparse_init)
@@ -235,11 +234,11 @@ class MultKAN(nn.Module):
 
 		self.symbolic_fun = nn.ModuleList(self.symbolic_fun)
 
-		if self.atom_names is not None:
-			# disable legacy symbolic branch – gating layer is the only source of nonlinearity
-			with torch.no_grad():
-				for l in range(self.depth):
-					self.symbolic_fun[l].mask.zero_()
+		# if self.atom_names is not None:
+		# 	# disable legacy symbolic branch – gating layer is the only source of nonlinearity
+		# 	with torch.no_grad():
+		# 		for l in range(self.depth):
+		# 			self.symbolic_fun[l].mask.zero_()
 				
 		self.affine_trainable = affine_trainable
 		self.sp_trainable = sp_trainable
@@ -476,7 +475,9 @@ class MultKAN(nn.Module):
 					 state_id=self.state_id,
 					 round=self.round,
 					 device=self.device,
-					 atom_names=self.atom_names)
+					 atom_names=self.atom_names,
+					 spline_weight_init_scale=self.spline_weight_init_scale,
+					 numeric_atom_configs=self.numeric_atom_configs)
 			
 		model_new.initialize_from_another_model(self, self.cache_data)
 		model_new.cache_data = self.cache_data
@@ -529,6 +530,8 @@ class MultKAN(nn.Module):
 			round = model.round,
 			device = str(model.device),
 			atom_names = model.atom_names,
+			spline_weight_init_scale = model.spline_weight_init_scale,
+			numeric_atom_configs = model.numeric_atom_configs,
 		)
 
 		for i in range (model.depth):
@@ -555,7 +558,9 @@ class MultKAN(nn.Module):
 			sb_trainable=config['sb_trainable'], state_id=config['state_id'],
 			auto_save=config['auto_save'], first_init=False,
 			ckpt_path=config['ckpt_path'], round=config['round']+1,
-			device=config['device'], atom_names=config['atom_names']
+			device=config['device'], atom_names=config['atom_names'], 
+			spline_weight_init_scale=config['spline_weight_init_scale'],
+			numeric_atom_configs=config['numeric_atom_configs'],
 		)
 		model_load.load_state_dict(state, strict=True)
 		model_load.cache_data = torch.load(f'{path}_cache_data')
@@ -802,24 +807,14 @@ class MultKAN(nn.Module):
 
 				# self.neurons_scale.append(torch.mean(torch.abs(x), dim=0))
 				#grid_reshape = self.act_fun[l].grid.reshape(self.width_out[l + 1], self.width_in[l], -1)
-				input_range = torch.std(preacts, dim=0)
-				input_range = torch.nan_to_num(input_range, nan=0.0, posinf=1.0, neginf=1.0)
-				input_range = input_range + 0.1                       # avoid divide-by-0
-
-				output_range_spline = torch.std(postacts_numerical, dim=0)
-				output_range_spline = torch.nan_to_num(output_range_spline, nan=0.0, posinf=1.0, neginf=1.0)
-
-				output_range = torch.std(postacts, dim=0)
-				output_range = torch.nan_to_num(output_range, nan=0.0, posinf=1.0, neginf=1.0)
-
-				edge_scale = torch.nan_to_num(output_range, nan=0.0, posinf=0.0, neginf=0.0)
-				self.edge_actscale.append(edge_scale)
-
-				ratio_all = torch.nan_to_num(output_range / input_range, nan=0.0, posinf=0.0, neginf=0.0)
-				ratio_spline = torch.nan_to_num(output_range_spline / input_range, nan=0.0, posinf=0.0, neginf=0.0)
-
-				self.acts_scale.append(ratio_all.detach())
-				self.acts_scale_spline.append(ratio_spline)
+				input_range = torch.std(preacts, dim=0) + 0.1
+				output_range_spline = torch.std(postacts_numerical, dim=0) # for training, only penalize the spline part
+				output_range = torch.std(postacts, dim=0) # for visualization, include the contribution from both spline + symbolic
+				# save edge_scale
+				self.edge_actscale.append(output_range)
+				
+				self.acts_scale.append((output_range / input_range)) # <-- no .detach()
+				self.acts_scale_spline.append(output_range_spline / input_range)
 				self.spline_preacts.append(preacts.detach())
 				self.spline_postacts.append(postacts.detach())
 				self.spline_postsplines.append(postspline.detach())
@@ -1420,10 +1415,10 @@ class MultKAN(nn.Module):
 		return self.reg(reg_metric, lamb_l1, lamb_entropy, lamb_coef, lamb_coefdiff, reg_type=reg_type)
 	
 	def get_params(self):
-		'''
-		Get parameters
-		'''
-		return self.parameters()
+		"""
+		Get parameters as a list (so they can be reused for clipping etc.).
+		"""
+		return list(self.parameters())
 		
 			
 	def fit(self, dataset, opt="LBFGS", steps=100, log=1, lamb=0., lamb_l1=1., lamb_entropy=2.,
@@ -1766,7 +1761,22 @@ class MultKAN(nn.Module):
 				if i not in active_neurons_down[l]:
 					self.remove_node(l + 1, i, mode='down',log_history=False)
 
-		model2 = MultKAN(copy.deepcopy(self.width), grid=self.grid, k=self.k, base_fun=self.base_fun_name, mult_arity=self.mult_arity, ckpt_path=self.ckpt_path, auto_save=True, first_init=False, state_id=self.state_id, round=self.round, atom_names=self.atom_names).to(self.device)
+		model2 = MultKAN(
+			copy.deepcopy(self.width),
+			grid=self.grid,
+			k=self.k,
+			base_fun=self.base_fun_name,
+			mult_arity=self.mult_arity,
+			ckpt_path=self.ckpt_path,
+			auto_save=True,
+			first_init=False,
+			state_id=self.state_id,
+			round=self.round,
+			atom_names=self.atom_names,
+			spline_weight_init_scale=self.spline_weight_init_scale,
+			numeric_atom_configs=self.numeric_atom_configs,
+		).to(self.device)
+
 		model2.load_state_dict(self.state_dict())
 		
 		width_new = [self.width[0]]
@@ -1846,6 +1856,10 @@ class MultKAN(nn.Module):
 		'''
 		if self.acts is None:
 			self.get_act()
+
+		# Ensure attribution / edge_scores are up-to-date
+		if self.edge_scores is None:
+			self.attribute()
 		
 		for i in range(len(self.width)-1):
 			with torch.no_grad():
@@ -1930,7 +1944,21 @@ class MultKAN(nn.Module):
 		else:
 			input_id = torch.tensor(active_inputs, dtype=torch.long).to(self.device)
 		
-		model2 = MultKAN(copy.deepcopy(self.width), grid=self.grid, k=self.k, base_fun=self.base_fun_name, mult_arity=self.mult_arity, ckpt_path=self.ckpt_path, auto_save=True, first_init=False, state_id=self.state_id, round=self.round, atom_names=self.atom_names).to(self.device)
+		model2 = MultKAN(
+			copy.deepcopy(self.width),
+			grid=self.grid,
+			k=self.k,
+			base_fun=self.base_fun_name,
+			mult_arity=self.mult_arity,
+			ckpt_path=self.ckpt_path,
+			auto_save=True,
+			first_init=False,
+			state_id=self.state_id,
+			round=self.round,
+			atom_names=self.atom_names,
+			spline_weight_init_scale=self.spline_weight_init_scale,
+			numeric_atom_configs=self.numeric_atom_configs,
+		).to(self.device)
 		model2.load_state_dict(self.state_dict())
 
 		model2.act_fun[0] = model2.act_fun[0].get_subset(input_id, torch.arange(self.width_out[1]))
@@ -2272,7 +2300,6 @@ class MultKAN(nn.Module):
 		lib=None,                   # list[str] atoms to try; default: all in SYMBOLIC_LIB except '0'
 		min_edge_score=None,        # optional stop if the top score < this
 		layers=None,                # None = all layers; or list[int]
-		mode="backward",            # "backward" (uses self.attribute) or "ols" surrogate
 		weight_simple = 0,
 		verbose=1,                   # 0 quiet, 1 picks only, 2 + details from suggest_symbolic
 		lr=1e-3,
@@ -2280,6 +2307,8 @@ class MultKAN(nn.Module):
 		lamb=0,
 		node_th=0, 
 		edge_th=0,
+		top_k=1,
+		**args
 	):
 		"""
 		Greedy: at each iteration, fix the single most important numeric B-spline edge.
@@ -2301,74 +2330,23 @@ class MultKAN(nn.Module):
 		# Which layers to consider
 		Ls = range(self.depth) if layers is None else layers
 
-		# === SCORE ALL CANDIDATE EDGES ===
-		if mode == "backward":
-			# Uses your built-in attribution (fills self.edge_scores per layer: [out_dim, in_dim])
-			self.attribute()
-			layer_scores = [s.detach().clone() for s in self.edge_scores]  # each: (out_dim, in_dim)
-		elif mode == "ols":
-			# Simple surrogate: for each layer, regress numeric pre-subnode sum t_j on numeric per-edge
-			# postacts to get |beta| as importance.
-			layer_scores = []
-			for l in Ls:
-				x_l = self.acts[l]                                        # (N, in_dim)
-				x_num, preacts, postacts_num, _ = self.act_fun[l](x_l)    # postacts_num: (N, out_dim, in_dim)
-				out_dim, in_dim = postacts_num.shape[1], postacts_num.shape[2]
-				scores_l = torch.zeros(out_dim, in_dim, device=device)
-				# mask out edges that are already symbolic or numerically pruned
-				mask_num = (self.act_fun[l].mask > 0)                     # (in_dim, out_dim)
-				mask_sym = (self.symbolic_fun[l].mask > 0)                # (out_dim, in_dim)
-
-				for j in range(out_dim):
-					t = x_num[:, [j]]  # (N,1)
-					F = postacts_num[:, j, :]  # (N, in_dim)
-					# Only numeric, non-symbolic edges are considered
-					keep = (mask_num[:, j] > 0) & (mask_sym[j, :] == 0)
-					if not torch.any(keep):
-						continue
-					Fk = F[:, keep]
-					# ridge-lite for stability
-					lam = 1e-6
-					# beta = (F^T F + lam I)^-1 F^T t
-					A = Fk.T @ Fk + lam * torch.eye(Fk.shape[1], device=device)
-					b = Fk.T @ t
-					beta = torch.linalg.solve(A, b)  # (k,1)
-					scores_l[j, keep] = beta[:, 0].abs() * Fk.std(dim=0)  # scale-aware
-				layer_scores.append(scores_l)
-		else:
-			raise ValueError("mode must be 'backward' or 'ols'")
-
-		# Build list of candidate edges with their scores
-		candidates = []  # list of dicts: {'l', 'i', 'j', 'score'}
-		for l in Ls:
-			scores = layer_scores[l]                          # (out_dim, in_dim)
-			num_mask = (self.act_fun[l].mask > 0).T           # (out_dim, in_dim)
-			sym_off  = (self.symbolic_fun[l].mask == 0)       # (out_dim, in_dim)
-			cand = scores.clone()
-			cand[~num_mask] = -float("inf")
-			cand[~sym_off]  = -float("inf")
-
-			# optional score threshold
-			if min_edge_score is not None:
-				cand[cand < float(min_edge_score)] = -float("inf")
-
-			js, is_ = torch.nonzero(torch.isfinite(cand), as_tuple=True)
-			for j, i in zip(js.tolist(), is_.tolist()):
-				s = float(cand[j, i].item())
-				candidates.append({"l": l, "i": i, "j": j, "score": s})
-
-		if verbose:
-			print(f"[parallel] #candidate edges: {len(candidates)}")
-
 		picks = []
 		i_fn = 0
 		nothing_left = False
 		while not nothing_left:
 			i_fn += 1
+
+			# === SCORE ALL CANDIDATE EDGES ===
+			# Uses built-in attribution (fills self.edge_scores per layer: [out_dim, in_dim])
+			self.attribute()
+			layer_scores = [s.detach().clone() for s in self.edge_scores]  # each: (out_dim, in_dim)
 			
 			# === FIND THE SINGLE BEST EDGE (global across layers) ===
 			best = None  # (score, l, i, j)
 			for l in Ls:
+				# # Skip gated layers: they are already symbolic/numeric via GatedSymbolicLayer
+				# if isinstance(self.act_fun[l], GatedSymbolicLayer):
+				# 	continue
 				scores = layer_scores[l]                       # (out_dim, in_dim)
 				# numeric candidates only
 				num_mask = (self.act_fun[l].mask > 0).T        # (out_dim, in_dim)
@@ -2388,6 +2366,7 @@ class MultKAN(nn.Module):
 					j, i = torch.nonzero(cand == val, as_tuple=False)[0]  # first argmax
 					if isinstance(l, GatedSymbolicLayer):
 						edge_choices = l.get_symbolic_choices()
+						print(edge_choices[(j, i)])
 						if edge_choices[(j, i)] not in GatedSymbolicLayer.numeric_layers:
 							continue
 					s = float(val.item())
@@ -2403,37 +2382,10 @@ class MultKAN(nn.Module):
 			score, l, i, j = best
 
 			if verbose >= 1:
-				print(f"[greedy] step {i_fn}: pick edge (l={l}, i={i}, j={j}) with score={score:.3e} (mode={mode})")
-
-			# if isinstance(self.act_fun[l], GatedSymbolicLayer):
-			# 	gate_layer = self.act_fun[l]
-			# 	logits_edge = gate_layer.gate_logits[j, i]
-			# 	probs_edge  = torch.softmax(logits_edge, dim=-1)
-			# 	p_numeric = probs_edge[0].item()
-			# 	p_best_symbolic = probs_edge[1:].max().item() if gate_layer.num_atoms > 0 else 0.0
-
-			# 	# Example heuristic: only bother with symbolic if best atom beats numeric
-			# 	if p_best_symbolic <= p_numeric:
-			# 		if verbose >= 1:
-			# 			print(f"[greedy] skip edge (l={l},i={i},j={j}) – gating prefers numeric ({p_numeric:.2f} vs {p_best_symbolic:.2f})")
-			# 		# Mark this edge as "done" by zeroing its score and continue
-			# 		layer_scores[l][j, i] = -float("inf")
-			# 		continue
-
+				print(f"[greedy] step {i_fn}: pick edge (l={l}, i={i}, j={j}) with score={score:.3e}")
 
 			best_function = None
 			best_loss = float('inf')
-			best_params = None
-			# for fun_name in lib:
-			# 	with _model_snapshot(self):  # snapshot-and-restore around each try
-			# 		r2, _, params = self.fix_symbolic(l, i, j, fun_name, fit_params_bool=False, verbose=(verbose>=2), log_history=False)
-			# 		results = self.fit(data, opt=optimizer, lr=lr, steps=steps, lamb=lamb)
-			# 		if results['train_loss'][-1] < best_loss:
-			# 			best_loss = results['train_loss'][-1]
-			# 			best_function = fun_name
-			# 			best_params = params
-			# 	# self.get_act(self.cache_data)
-
 			# --- build edge-specific library ordering using gating ---
 			if isinstance(self.act_fun[l], GatedSymbolicLayer):
 				gate_layer = self.act_fun[l]
@@ -2441,69 +2393,65 @@ class MultKAN(nn.Module):
 				logits_edge = gate_layer.gate_logits[j, i]
 				probs_edge  = torch.softmax(logits_edge, dim=-1)
 
-				K = gate_layer.num_atoms
-				# probs for symbolic atoms only (exclude numeric index 0)
-				atom_probs = probs_edge[1:1+K]                 # [K]
-				atom_order = torch.argsort(atom_probs, descending=True).tolist()
-
+				atom_order = torch.argsort(probs_edge, descending=True).tolist()
 				# Build a gated ordering of names that also exist in 'lib'
-				gated_lib = []
-				for k_idx in atom_order:
-					name = gate_layer.atom_names[k_idx]
-					if name in lib and name not in gated_lib:
-						gated_lib.append(name)
-
-				# Optional: truncate to top N suggested atoms for speed
-				TOP_K_PER_EDGE = 3
-				gated_lib = gated_lib[:TOP_K_PER_EDGE]
-
-				# Add remaining lib entries (e.g., '0' or atoms not in atom_names)
-				lib_edge = gated_lib + [name for name in lib if name not in gated_lib]
+				lib_edge = [
+					gate_layer.atom_names[k_idx]
+					for k_idx in atom_order[:top_k]
+					# if gate_layer.atom_names[k_idx] in GatedSymbolicLayer.numeric_layers
+				]
+				if any(map(lambda x: x in GatedSymbolicLayer.numeric_layers, lib_edge)):
+					lib_edge = lib
+					assert False
 			else:
 				# fall back to global lib
 				lib_edge = lib
 
+			if not lib_edge:
+				raise RuntimeError('No symbolic functions to map')
+
 			# --- search over this edge-specific lib ---
-			for fun_name in lib_edge:
-				with _model_snapshot(self):  # snapshot-and-restore around each try
-					r2, _, params = self.fix_symbolic(
-						l, i, j, fun_name,
-						fit_params_bool=False,
-						verbose=(verbose >= 2),
-						log_history=False
-					)
-					results = self.fit(data, opt=optimizer, lr=lr, steps=steps, lamb=lamb)
-					if results['train_loss'][-1] < best_loss:
-						best_loss = results['train_loss'][-1]
-						best_function = fun_name
-						best_params = params
+			if len(lib_edge) == 1:
+				best_function = lib_edge[0]
+				best_loss = None
+			else:
+				for fun_name in lib_edge:
+					with _model_snapshot(self):  # snapshot-and-restore around each try
+						self.fix_symbolic(
+							l, i, j, fun_name,
+							fit_params_bool=False,
+							verbose=(verbose >= 2),
+							log_history=False
+						)
+						results = self.fit(data, opt=optimizer, lr=lr, steps=steps, lamb=lamb)
+						if results['train_loss'][-1] < best_loss:
+							best_loss = results['train_loss'][-1]
+							best_function = fun_name
 
 			# commit winner
 			if not best_function:
 				best_function = '0'
-				r2, loss, params = self.fix_symbolic(l, i, j, '0', fit_params_bool=False, verbose=(verbose>=2), log_history=False)
+				self.fix_symbolic(l, i, j, '0', fit_params_bool=False, verbose=(verbose>=2), log_history=False)
 			else:
-				r2, loss, params = self.fix_symbolic(l, i, j, best_function, fit_params_bool=False, verbose=(verbose>=2), log_history=False)
+				self.fix_symbolic(l, i, j, best_function, fit_params_bool=False, verbose=(verbose>=2), log_history=False)
 			picks.append({
 				'l': l, 
 				'i': i, 
 				'j': j, 
 				'fun': best_function, 
-				'params': params, 
-				'loss': loss,
-				'r2': float(r2) if r2 is not None else None, 
+				'loss': best_loss,
 				'score': score
 			})
 			self.fit(data, opt=optimizer, lr=lr, steps=steps, lamb=lamb)
 			if node_th or edge_th:
 				self = self.prune(node_th=node_th, edge_th=edge_th)
-			# # # # Forward once per iteration to refresh acts/scales on the current model
-			# # # self.get_act(self.cache_data)
+			# # Forward once per iteration to refresh acts/scales on the current model
+			# self.get_act(self.cache_data)
 
 		# housekeeping
 		self.log_history('auto_symbolic_robust_greedy')
 		# self.save_act = save_before
-		return picks
+		return self, picks
 
 	def symbolic_formula(self, var=None, normalizer=None, output_normalizer=None, simplify=False):
 		symbolic_acts = []
@@ -2544,13 +2492,19 @@ class MultKAN(nn.Module):
 			num_sum = self.width[l + 1][0]
 			num_mult = self.width[l + 1][1]
 
+			layer = self.act_fun[l]
+
 			# get op type per subnode if using KANLayer, else default to "add"
-			if hasattr(self.act_fun[l], "get_op_choice"):
-				op_types = self.act_fun[l].get_op_choice(hard=True)
+			if hasattr(layer, "get_op_choice"):
+				op_types = layer.get_op_choice(hard=True)
 			else:
 				op_types = ["add"] * self.width_out[l+1]
 
 			y = []
+
+			# -------------------------------------------------------------
+			# Per-subnode expression y_j
+			# -------------------------------------------------------------
 			for j in range(self.width_out[l + 1]):
 				op = op_types[j] if j < len(op_types) else "add"
 
@@ -2560,25 +2514,81 @@ class MultKAN(nn.Module):
 				else:
 					yj = SymFloat(0.0)
 
-				for i in range(self.width_in[l]):
-					a, b, c, d = [ _sf(v) for v in self.symbolic_fun[l].affine[j, i] ]
-					sympy_fun = self.symbolic_fun[l].funs_sympy[j][i]
+				# ---------------------- choose source ----------------------
+				# use gated layer *only* if symbolic layer has not been fixed yet
+				use_gated = (
+					isinstance(layer, GatedSymbolicLayer)
+					and self.symbolic_fun[l].mask.abs().sum().item() == 0
+				)
 
-					term = d
-					# guard tiny scales for stability
-					if abs(float(c)) > 1e-12:
-						arg = a * x[i] + b
-						try:
-							val = sympy_fun(arg)
-						except Exception as e:
-							print('Error in symbolic edge (l,i,j):', l, i, j, e)
-							return
-						term = term + c * val
+				if use_gated:
+					# ---------- CASE 1: use GatedSymbolicLayer ----------
+					gated = layer
+					O, I = gated.out_dim, gated.in_dim
 
-					if op == "mul":
-						yj = yj * term
-					else:
-						yj = yj + term
+					for i in range(self.width_in[l]):
+						# pruning mask: skip dead edges
+						if gated.mask[i, j] <= 0:
+							continue
+
+						# hard gate: pick best atom index
+						logits_ij = gated.gate_logits[j, i]  # [K]
+						best_k = int(torch.argmax(logits_ij).item())
+						atom_name = gated.atom_names[best_k]
+
+						# skip numeric atoms in symbolic formula
+						if atom_name not in gated.base_atom_names:
+							continue
+
+						sympy_fun = SYMBOLIC_LIB[atom_name][1]
+
+						a_t = gated.affine[j, i, best_k, 0]
+						b_t = gated.affine[j, i, best_k, 1]
+						c_t = gated.affine[j, i, best_k, 2]
+						d_t = gated.affine[j, i, best_k, 3]
+
+						a = _sf(a_t)
+						b = _sf(b_t)
+						c = _sf(c_t)
+						d = _sf(d_t)
+
+						term = d
+						if abs(float(c)) > 1e-12:
+							arg = a * x[i] + b
+							try:
+								val = sympy_fun(arg)
+							except Exception as e:
+								print('Error in gated symbolic edge (l,i,j):', l, i, j, 'atom:', atom_name, e)
+								continue
+							term = term + c * val
+
+						term = SymFloat(float(gated.symbolic_scale)) * term
+
+						if op == "mul":
+							yj = yj * term
+						else:
+							yj = yj + term
+
+				else:
+					# ---------- CASE 2: use legacy Symbolic_KANLayer ----------
+					for i in range(self.width_in[l]):
+						a, b, c, d = [_sf(v) for v in self.symbolic_fun[l].affine[j, i]]
+						sympy_fun = self.symbolic_fun[l].funs_sympy[j][i]
+
+						term = d
+						if abs(float(c)) > 1e-12:
+							arg = a * x[i] + b
+							try:
+								val = sympy_fun(arg)
+							except Exception as e:
+								print('Error in symbolic edge (l,i,j):', l, i, j, e)
+								continue
+							term = term + c * val
+
+						if op == "mul":
+							yj = yj * term
+						else:
+							yj = yj + term
 
 				# subnode affine
 				yj = _sf(self.subnode_scale[l][j]) * yj + _sf(self.subnode_bias[l][j])
@@ -2598,8 +2608,9 @@ class MultKAN(nn.Module):
 
 			symbolic_acts_premult.append(y)
 
-			# your existing multiplication-node logic (if you still use mult_arity) can remain;
-			# here I'm assuming you keep that as-is:
+			# -------------------------------------------------------------
+			# multiplication-node logic (unchanged)
+			# -------------------------------------------------------------
 			mult = []
 			offset = num_sum
 			for k in range(num_mult):
@@ -2622,6 +2633,9 @@ class MultKAN(nn.Module):
 			x = y
 			symbolic_acts.append(x)
 
+		# -------------------------------------------------------------
+		# output normalizer
+		# -------------------------------------------------------------
 		if output_normalizer is not None:
 			output_layer = symbolic_acts[-1]
 			means = output_normalizer[0]
@@ -2635,6 +2649,7 @@ class MultKAN(nn.Module):
 		self.symbolic_acts_premult = [[symbolic_acts_premult[l][i] for i in range(len(symbolic_acts_premult[l]))] for l in range(len(symbolic_acts_premult))]
 
 		return [symbolic_acts[-1][i] for i in range(len(symbolic_acts[-1]))], x0
+
 		
 	def expand_depth(self):
 		'''
@@ -2656,9 +2671,9 @@ class MultKAN(nn.Module):
 		# add kanlayer, set mask to zero
 		dim_out = self.width_in[-1]
 		if self.atom_names is None:
-			layer = KANLayer(dim_out, dim_out, num_grids=self.grid)
+			layer = KANLayer(dim_out, dim_out, num_grids=self.grid).to(self.device)
 		else:
-			layer = GatedSymbolicLayer(dim_out, dim_out, atom_names=self.atom_names, num_grids=self.grid)
+			layer = GatedSymbolicLayer(dim_out, dim_out, atom_names=self.atom_names, numeric_atom_configs=self.numeric_atom_configs).to(self.device)
 		
 		# layer = KANLayer(dim_out, dim_out, num=self.grid, k=self.k)
 		with torch.no_grad():
@@ -2742,7 +2757,7 @@ class MultKAN(nn.Module):
 					if self.atom_names is None:
 						self.act_fun[l] = KANLayer(in_dim, out_dim + n_added_nodes, num_grids=self.grid).to(self.device)
 					else:
-						self.act_fun[l] = GatedSymbolicLayer(in_dim, out_dim + n_added_nodes, atom_names=self.atom_names, num_grids=self.grid).to(self.device)
+						self.act_fun[l] = GatedSymbolicLayer(in_dim, out_dim + n_added_nodes, atom_names=self.atom_names, numeric_atom_configs=self.numeric_atom_configs).to(self.device)
 					
 					# self.act_fun[l] = KANLayer(in_dim, out_dim + n_added_nodes, num=self.grid, k=self.k).to(self.device)
 					with torch.no_grad():
@@ -2785,9 +2800,9 @@ class MultKAN(nn.Module):
 
 					self.symbolic_fun[l] = new
 					if self.atom_names is None:
-						self.act_fun[l] = KANLayer(in_dim + n_added_nodes, out_dim, num_grids=self.grid)
+						self.act_fun[l] = KANLayer(in_dim + n_added_nodes, out_dim, num_grids=self.grid).to(self.device)
 					else:
-						self.act_fun[l] = GatedSymbolicLayer(in_dim + n_added_nodes, out_dim, atom_names=self.atom_names, num_grids=self.grid)
+						self.act_fun[l] = GatedSymbolicLayer(in_dim + n_added_nodes, out_dim, atom_names=self.atom_names, numeric_atom_configs=self.numeric_atom_configs).to(self.device)
 					
 					# self.act_fun[l] = KANLayer(in_dim + n_added_nodes, out_dim, num=self.grid, k=self.k)
 					with torch.no_grad():
@@ -2824,9 +2839,9 @@ class MultKAN(nn.Module):
 
 					self.symbolic_fun[l] = new
 					if self.atom_names is None:
-						self.act_fun[l] = KANLayer(in_dim, out_dim + n_added_subnodes, num_grids=self.grid)
+						self.act_fun[l] = KANLayer(in_dim, out_dim + n_added_subnodes, num_grids=self.grid).to(self.device)
 					else:
-						self.act_fun[l] = GatedSymbolicLayer(in_dim, out_dim + n_added_subnodes, atom_names=self.atom_names, num_grids=self.grid)
+						self.act_fun[l] = GatedSymbolicLayer(in_dim, out_dim + n_added_subnodes, atom_names=self.atom_names, numeric_atom_configs=self.numeric_atom_configs).to(self.device)
 					
 					# self.act_fun[l] = KANLayer(in_dim, out_dim + n_added_subnodes, num=self.grid, k=self.k)
 					with torch.no_grad():
@@ -2867,9 +2882,9 @@ class MultKAN(nn.Module):
 
 					self.symbolic_fun[l] = new
 					if self.atom_names is None:
-						self.act_fun[l] = KANLayer(in_dim + n_added_nodes, out_dim, num_grids=self.grid)
+						self.act_fun[l] = KANLayer(in_dim + n_added_nodes, out_dim, num_grids=self.grid).to(self.device)
 					else:
-						self.act_fun[l] = GatedSymbolicLayer(in_dim + n_added_nodes, out_dim, atom_names=self.atom_names, num_grids=self.grid)
+						self.act_fun[l] = GatedSymbolicLayer(in_dim + n_added_nodes, out_dim, atom_names=self.atom_names, numeric_atom_configs=self.numeric_atom_configs).to(self.device)
 					
 					# self.act_fun[l] = KANLayer(in_dim + n_added_nodes, out_dim, num=self.grid, k=self.k)
 					with torch.no_grad():
@@ -3078,22 +3093,30 @@ class MultKAN(nn.Module):
 
 	
 	def swap(self, l, i1, i2, log_history=True):
-		
-		self.act_fun[l-1].swap(i1,i2,mode='out')
-		self.symbolic_fun[l-1].swap(i1,i2,mode='out')
-		self.act_fun[l].swap(i1,i2,mode='in')
-		self.symbolic_fun[l].swap(i1,i2,mode='in')
-		
-		def swap_(data, i1, i2):
-			data[i1], data[i2] = data[i2], data[i1]
-			
-		swap_(self.node_scale[l-1], i1, i2)
-		swap_(self.node_bias[l-1], i1, i2)
+		"""
+		Swap neurons i1 and i2 in layer l in a grad-safe way.
+		"""
+		# swap structural parts in child modules
+		self.act_fun[l-1].swap(i1, i2, mode='out')
+		self.symbolic_fun[l-1].swap(i1, i2, mode='out')
+		self.act_fun[l].swap(i1, i2, mode='in')
+		self.symbolic_fun[l].swap(i1, i2, mode='in')
+
+		def swap_(param: torch.nn.Parameter, i1: int, i2: int):
+			# in-place swap without breaking autograd bookkeeping
+			with torch.no_grad():
+				tmp = param[i1].clone()
+				param[i1].copy_(param[i2])
+				param[i2].copy_(tmp)
+
+		swap_(self.node_scale[l-1],    i1, i2)
+		swap_(self.node_bias[l-1],     i1, i2)
 		swap_(self.subnode_scale[l-1], i1, i2)
-		swap_(self.subnode_bias[l-1], i1, i2)
-		
+		swap_(self.subnode_bias[l-1],  i1, i2)
+
 		if log_history:
 			self.log_history('swap')
+
 			
 	@property
 	def connection_cost(self):
