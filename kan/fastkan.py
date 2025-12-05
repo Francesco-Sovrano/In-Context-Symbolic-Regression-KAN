@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+import copy
 from .utils import SYMBOLIC_LIB
 from typing import *
 
@@ -374,24 +375,27 @@ class FastKAN(nn.Module):
 			x, *_ = layer(x)   # keep only x_numerical
 		return x
 
+NUMERIC_ATOM_FNS = {
+	"stepbf": StepBasisFunction,
+	"rbf": RadialBasisFunction,
+}
+
 class GatedSymbolicLayer(nn.Module):
 	"""
-	Pure symbolic layer with differentiable gating over SYMBOLIC_LIB atoms
-	plus an optional StepBasisFunction atom.
+	Symbolic + numeric layer with differentiable gating over SYMBOLIC_LIB atoms
+	plus optional numeric atoms (step basis, RBF, ...).
 
-	For each edge (i -> j) and each atom k in `atom_names` (+ optional step atom) we have
-		a_{j,i,k}, b_{j,i,k}, c_{j,i,k}, d_{j,i,k}
-	and compute
-		phi_{j,i,k}(x) = d + c * f_k(a * x + b).
+	For symbolic atoms k:
+		phi_{j,i,k}(x) = d_{j,i,k} + c_{j,i,k} * f_k(a_{j,i,k} * x + b_{j,i,k})
 
-	We gate over atoms only (no numeric spline / FastKAN):
-		edge_out(b,j,i) = sum_k softmax(gate_logits[j,i,:])_k * phi_{j,i,k}(pre[b,i])
-
-	Then x_out[b,j] = sum_i edge_out[b,j,i].
+	For numeric atoms k:
+		phi_{j,i,k}(x) = g_{j,i,k}(x_i)
+	where g_{j,i,k} is an independent numeric module per edge (j,i)
+	(no a,b,c,d wrapper).
 	"""
-	numeric_layers = [
-		"stepbf"
-	]
+
+	# names of built-in numeric atom *types* we know how to construct
+	numeric_layers = list(NUMERIC_ATOM_FNS.keys())
 
 	def __init__(
 		self,
@@ -401,12 +405,10 @@ class GatedSymbolicLayer(nn.Module):
 		*,
 		init_atom_bias: float = 0.0,
 		symbolic_scale: float = 1.0,
-		# NEW: optional StepBasisFunction as an extra atom
-		use_step_basis: bool = False,
-		step_atom_name: str = "stepbf",
-		step_basis_kwargs: Optional[Dict[str, Any]] = None,
+		# fn_name -> kwargs, e.g. {"stepbf": {...}, "rbf": {...}}
+		numeric_atom_configs: Optional[Dict[str, Dict[str, Any]]] = None,
 		**args,
-	) -> None:
+	):
 		super().__init__()
 
 		self.in_dim = input_dim
@@ -414,20 +416,31 @@ class GatedSymbolicLayer(nn.Module):
 		self.base_atom_names = list(atom_names)          # atoms from SYMBOLIC_LIB
 		self.symbolic_scale = symbolic_scale
 
-		# Step-basis configuration
-		self.use_step_basis = use_step_basis
-		self.step_atom_name = step_atom_name
-		if self.use_step_basis:
-			if step_basis_kwargs is None:
-				step_basis_kwargs = {}
-			self.step_basis = StepBasisFunction(**step_basis_kwargs)
-			extra_names = [self.step_atom_name]
+		# ---- numeric atoms configuration ----
+		if numeric_atom_configs is not None:
+			self._numeric_atom_configs = copy.deepcopy(numeric_atom_configs)
 		else:
-			self.step_basis = None
-			extra_names = []
+			self._numeric_atom_configs = {}
 
-		# Full list of atoms (including optional step atom)
-		self.atom_names = self.base_atom_names + extra_names
+		# For each numeric fn_name we create a separate module per edge (j,i)
+		# numeric_atoms[fn_name] : ModuleList length (out_dim * in_dim)
+		self.numeric_atoms = nn.ModuleDict()
+		numeric_names: List[str] = []
+		for fn_name, kwargs in self._numeric_atom_configs.items():
+			if fn_name not in NUMERIC_ATOM_FNS:
+				raise ValueError(
+					f"Unknown numeric atom type '{fn_name}'. "
+					f"Known types: {list(NUMERIC_ATOM_FNS.keys())}"
+				)
+			basis_cls = NUMERIC_ATOM_FNS[fn_name]
+			modules = nn.ModuleList(
+				[basis_cls(**kwargs) for _ in range(self.out_dim * self.in_dim)]
+			)
+			self.numeric_atoms[fn_name] = modules
+			numeric_names.append(fn_name)
+
+		# Full list of atoms (including optional numeric atoms)
+		self.atom_names = self.base_atom_names + numeric_names
 		self.num_atoms = len(self.atom_names)
 
 		# simple LN over inputs for "preacts"
@@ -447,6 +460,7 @@ class GatedSymbolicLayer(nn.Module):
 			self.gate_logits += init_atom_bias  # typically 0
 
 		# per-edge per-atom affine params: [out_dim, in_dim, K, 4] = (a,b,c,d)
+		# these are ONLY USED for symbolic atoms, ignored for numeric ones
 		if self.num_atoms > 0:
 			self.affine = nn.Parameter(
 				torch.zeros(self.out_dim, self.in_dim, self.num_atoms, 4)
@@ -461,7 +475,6 @@ class GatedSymbolicLayer(nn.Module):
 			self.affine = None
 
 		# --- fake KAN-style meta fields so MultKAN doesn't break ---
-		# Out "sum" and "mult" node counts (this layer has no internal mult nodes)
 		self.out_dim_sum = output_dim
 		self.out_dim_mult = 0
 
@@ -487,20 +500,15 @@ class GatedSymbolicLayer(nn.Module):
 	# ------------------------------------------------------------------
 	@property
 	def coef(self) -> torch.Tensor:
-		"""
-		Dummy coefficient tensor just so reg() doesn't blow up.
-		Shape [num_edges, num_grids]. We don't actually use spline grids here.
-		"""
+		"""Dummy coefficient tensor just so reg() doesn't blow up."""
 		return self._dummy_coef
 
 	@torch.no_grad()
 	def update_grid_from_samples(self, acts: torch.Tensor):
-		# Pure symbolic layer: nothing to update.
 		return
 
 	@torch.no_grad()
 	def initialize_grid_from_parent(self, parent_layer, parent_acts: torch.Tensor):
-		# Again: nothing to copy for a spline grid.
 		return
 
 	# ------------------------------------------------------------------
@@ -522,6 +530,7 @@ class GatedSymbolicLayer(nn.Module):
 		if K == 0:
 			return torch.zeros(B, O, I, 0, device=device)
 
+		# for symbolic atoms: pre -> a,b,c,d wrapper
 		pre_exp = pre[:, None, :, None]   # [B,1,I,1]
 
 		a = self.affine[..., 0]  # [O,I,K]
@@ -535,35 +544,53 @@ class GatedSymbolicLayer(nn.Module):
 		d_b = d.unsqueeze(0)
 
 		arg = a_b * pre_exp + b_b       # [B,O,I,K]
-		sym_vals = torch.zeros_like(arg)
+		sym_vals = torch.zeros(B, O, I, K, device=device)
 
 		for k_idx, name in enumerate(self.atom_names):
-			arg_k = arg[..., k_idx]     # [B,O,I]
+			# ---------- NUMERIC ATOMS (no a,b,c,d, separate function per edge) ----------
+			if name in self.numeric_atoms:
+				modules = self.numeric_atoms[name]   # ModuleList length O*I
+				# iterate edges (j,i)
+				for j in range(O):
+					for i in range(I):
+						edge_idx = j * I + i
+						basis = modules[edge_idx]
+						xin = pre[:, i]       # [B]
+						v_ji = basis(xin)     # [B] or [B,G] or [B,1,G]
 
-			if self.use_step_basis and name == self.step_atom_name:
-				# --- StepBasisFunction atom ---
-				# StepBasisFunction: x [..., I] -> [..., I, G]
-				# Here arg_k has shape [B,O,I] so output is [B,O,I,G].
-				sb = self.step_basis(arg_k)      # [B,O,I,G]
-				v = sb.mean(dim=-1)             # reduce over grid -> [B,O,I]
+						# reduce grid dimension if present
+						if v_ji.ndim == 3:         # [B,1,G] or [..., I, G] with I==1
+							v_ji = v_ji.mean(dim=-1)   # -> [B,1]
+						if v_ji.ndim == 2:         # [B,G] or [B,1]
+							v_ji = v_ji.mean(dim=-1)   # -> [B]
+						if v_ji.ndim != 1:
+							raise RuntimeError(
+								f"Numeric atom '{name}' per-edge module returned shape {v_ji.shape}, "
+								"expected [B], [B,G] or [B,1,G]."
+							)
+
+						v_ji = torch.nan_to_num(v_ji, nan=0.0, posinf=1e3, neginf=-1e3)
+						sym_vals[:, j, i, k_idx] = v_ji
+				continue
+
+			# ---------- SYMBOLIC ATOMS (with a,b,c,d) ----------
+			arg_k = arg[..., k_idx]             # [B,O,I]
+			torch_fun = SYMBOLIC_LIB[name][0]
+
+			# crude domain fixes for logs/sqrts
+			if "log" in name.lower():
+				arg_local = arg_k.abs() + 1e-3
+			elif "sqrt" in name.lower():
+				arg_local = arg_k.abs()
 			else:
-				# standard SYMBOLIC_LIB atom
-				torch_fun = SYMBOLIC_LIB[name][0]
+				arg_local = arg_k
 
-				# crude domain fixes for logs/sqrts
-				if "log" in name.lower():
-					arg_local = arg_k.abs() + 1e-3
-				elif "sqrt" in name.lower():
-					arg_local = arg_k.abs()
-				else:
-					arg_local = arg_k
+			v = torch_fun(arg_local)            # broadcasting
 
-				v = torch_fun(arg_local)  # expects broadcasting
-
-				# ensure [B,O,I]
-				while v.ndim < 3:
-					v = v.unsqueeze(-1)
-				v = v.reshape(B, O, I)
+			# ensure [B,O,I]
+			while v.ndim < 3:
+				v = v.unsqueeze(-1)
+			v = v.reshape(B, O, I)
 
 			v = torch.nan_to_num(v, nan=0.0, posinf=1e3, neginf=-1e3)
 
@@ -610,7 +637,7 @@ class GatedSymbolicLayer(nn.Module):
 		# preacts: broadcast pre per output
 		preacts = pre.unsqueeze(1).expand(B, O, I)    # [B,O,I]
 
-		# 1) symbolic candidates per-edge
+		# 1) symbolic + numeric candidates per-edge
 		sym_vals = self._symbolic_vals(pre)          # [B,O,I,K]
 
 		# 2) gating over atoms
@@ -693,8 +720,7 @@ class GatedSymbolicLayer(nn.Module):
 			atom_names=self.base_atom_names,
 			init_atom_bias=0.0,
 			symbolic_scale=self.symbolic_scale,
-			use_step_basis=self.use_step_basis,
-			step_atom_name=self.step_atom_name,
+			numeric_atom_configs=self._numeric_atom_configs,
 		).to(self.mask.device)
 
 		# mask
@@ -709,10 +735,16 @@ class GatedSymbolicLayer(nn.Module):
 			new.gate_logits.copy_(self.gate_logits[out_ids][:, in_ids, :])
 			new.affine.copy_(self.affine[out_ids][:, in_ids, :, :])
 
-		# step basis params
-		if self.use_step_basis:
-			new.step_basis.grid.copy_(self.step_basis.grid)
-			new.step_basis.log_k.copy_(self.step_basis.log_k)
+		# numeric atom params: remap per-edge
+		old_I = self.in_dim
+		new_I = new.in_dim
+		for name, modules in self.numeric_atoms.items():
+			new_modules = new.numeric_atoms[name]
+			for new_j, j_orig in enumerate(out_ids.tolist()):
+				for new_i, i_orig in enumerate(in_ids.tolist()):
+					old_idx = j_orig * old_I + i_orig
+					new_idx = new_j * new_I + new_i
+					new_modules[new_idx].load_state_dict(modules[old_idx].state_dict())
 
 		# meta
 		new.out_dim_sum = out_ids.numel()
@@ -743,6 +775,17 @@ class GatedSymbolicLayer(nn.Module):
 			lnw[[i1, i2]] = lnw[[i2, i1]]
 			lnb[[i1, i2]] = lnb[[i2, i1]]
 
+			# numeric atoms: swap per-edge along input index
+			I = self.in_dim
+			for name, modules in self.numeric_atoms.items():
+				for j in range(self.out_dim):
+					idx1 = j * I + i1
+					idx2 = j * I + i2
+					st1 = modules[idx1].state_dict()
+					st2 = modules[idx2].state_dict()
+					modules[idx1].load_state_dict(st2)
+					modules[idx2].load_state_dict(st1)
+
 		else:  # mode == "out"
 			self.mask[:, [i1, i2]] = self.mask[:, [i2, i1]]
 
@@ -755,3 +798,14 @@ class GatedSymbolicLayer(nn.Module):
 			sp = self.scale_sp.data
 			sb[[i1, i2]] = sb[[i2, i1]]
 			sp[[i1, i2]] = sp[[i2, i1]]
+
+			# numeric atoms: swap per-edge along output index
+			I = self.in_dim
+			for name, modules in self.numeric_atoms.items():
+				for i in range(self.in_dim):
+					idx1 = i1 * I + i
+					idx2 = i2 * I + i
+					st1 = modules[idx1].state_dict()
+					st2 = modules[idx2].state_dict()
+					modules[idx1].load_state_dict(st2)
+					modules[idx2].load_state_dict(st1)
