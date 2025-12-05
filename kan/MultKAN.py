@@ -24,6 +24,16 @@ from .hypothesis import plot_tree
 import tempfile
 import contextlib, signal, sympy as sp
 import math
+import re
+
+def compactify_symbolic_formula(f):
+	f = str(f)
+	f = re.sub(r'(\d+\.\d\d\d\d)\d+', r'\1', f)
+	f = re.sub(r'0\.9+\*', '', f)
+	f = re.sub(r'1\.0+\*', '', f)
+	f = re.sub(r'\s+[+-]\s+\d\.\d+e-[4-9]\d?', '', f)
+	f = re.sub(r'\d\.\d+e-[4-9]\d?\s+[+-]\s+', '', f)
+	return f
 
 @contextlib.contextmanager
 def _model_snapshot(model):
@@ -720,8 +730,8 @@ class MultKAN(nn.Module):
 	def symbolic_enabled(self):
 		# Only count legacy Symbolic_KANLayer when it's actually active.
 		return any(
-			not isinstance(self.act_fun[l], GatedSymbolicLayer)
-			and self.symbolic_fun[l].mask.abs().sum().item() > 0
+			self.symbolic_fun[l].mask.abs().sum().item() > 0
+			# and not isinstance(self.act_fun[l], GatedSymbolicLayer)
 			for l in range(self.depth)
 		)
 
@@ -778,14 +788,14 @@ class MultKAN(nn.Module):
 
 		self.acts.append(x)  # acts shape: (batch, width[l])
 
-		_symbolic_enabled = self.symbolic_enabled
+		# _symbolic_enabled = self.symbolic_enabled
 
 		for l in range(self.depth):
 			
 			x_numerical, preacts, postacts_numerical, postspline = self.act_fun[l](x)
 			#print(preacts, postacts_numerical, postspline)
 			
-			if _symbolic_enabled and not isinstance(self.act_fun[l], GatedSymbolicLayer):
+			if self.symbolic_fun[l].mask.abs().sum().item() > 0:
 				x_symbolic, postacts_symbolic = self.symbolic_fun[l](
 					x, singularity_avoiding=singularity_avoiding, y_th=y_th
 				)
@@ -1665,6 +1675,19 @@ class MultKAN(nn.Module):
 		self.log_history('fit')
 		return results
 
+	def prune_symbolic_gates_topk(self, k: int, layers=None, symbolic_only: bool = True):
+		"""
+		For each GatedSymbolicLayer in act_fun, prune its symbolic gates
+		to top-k per edge.
+		"""
+		if layers is None:
+			layers = range(self.depth)
+
+		for l in layers:
+			layer = self.act_fun[l]
+			if isinstance(layer, GatedSymbolicLayer):
+				layer.prune_gates_topk(k=k, symbolic_only=symbolic_only)
+
 
 	def prune_node(self, threshold=1e-2, mode="auto", active_neurons_id=None, log_history=True):
 		'''
@@ -1870,7 +1893,7 @@ class MultKAN(nn.Module):
 		if log_history:
 			self.log_history('prune_edge')
 	
-	def prune(self, node_th=1e-2, edge_th=0):
+	def prune(self, node_th=1e-2, edge_th=0, gate_top_k=0):
 		if self.acts is None:
 			self.get_act()
 		
@@ -1891,6 +1914,9 @@ class MultKAN(nn.Module):
 				"prune() removed all active edges; model is now empty. "
 				"Try using smaller node_th / edge_th, or disable pruning here."
 			)
+
+		if gate_top_k:
+			model.prune_symbolic_gates_topk(k=gate_top_k)
 
 		model.log_history('prune')
 		return model
@@ -2307,7 +2333,7 @@ class MultKAN(nn.Module):
 		lamb=0,
 		node_th=0, 
 		edge_th=0,
-		top_k=1,
+		top_k_gates=1,
 		**args
 	):
 		"""
@@ -2364,11 +2390,12 @@ class MultKAN(nn.Module):
 				val = torch.max(cand)
 				if torch.isfinite(val):
 					j, i = torch.nonzero(cand == val, as_tuple=False)[0]  # first argmax
-					if isinstance(l, GatedSymbolicLayer):
-						edge_choices = l.get_symbolic_choices()
-						print(edge_choices[(j, i)])
-						if edge_choices[(j, i)] not in GatedSymbolicLayer.numeric_layers:
-							continue
+					# if isinstance(self.act_fun[l], GatedSymbolicLayer):
+					# 	gate_layer = self.act_fun[l]
+					# 	edge_choices = gate_layer.get_symbolic_choices()
+					# 	# print(edge_choices[(j, i)])
+					# 	if edge_choices[(j, i)] not in GatedSymbolicLayer.numeric_layers:
+					# 		continue
 					s = float(val.item())
 					if (best is None) or (s > best[0]):
 						best = (s, l, int(i.item()), int(j.item()))
@@ -2397,12 +2424,12 @@ class MultKAN(nn.Module):
 				# Build a gated ordering of names that also exist in 'lib'
 				lib_edge = [
 					gate_layer.atom_names[k_idx]
-					for k_idx in atom_order[:top_k]
+					for k_idx in atom_order[:top_k_gates]
 					# if gate_layer.atom_names[k_idx] in GatedSymbolicLayer.numeric_layers
 				]
 				if any(map(lambda x: x in GatedSymbolicLayer.numeric_layers, lib_edge)):
 					lib_edge = lib
-					assert False
+					# assert False
 			else:
 				# fall back to global lib
 				lib_edge = lib
@@ -2453,7 +2480,7 @@ class MultKAN(nn.Module):
 		# self.save_act = save_before
 		return self, picks
 
-	def symbolic_formula(self, var=None, normalizer=None, output_normalizer=None, simplify=False):
+	def symbolic_formula(self, var=None, normalizer=None, output_normalizer=None, simplify=False, compact=True):
 		symbolic_acts = []
 		symbolic_acts_premult = []
 		x = []
@@ -2648,8 +2675,10 @@ class MultKAN(nn.Module):
 		self.symbolic_acts = [[symbolic_acts[l][i] for i in range(len(symbolic_acts[l]))] for l in range(len(symbolic_acts))]
 		self.symbolic_acts_premult = [[symbolic_acts_premult[l][i] for i in range(len(symbolic_acts_premult[l]))] for l in range(len(symbolic_acts_premult))]
 
-		return [symbolic_acts[-1][i] for i in range(len(symbolic_acts[-1]))], x0
-
+		symbolic_formula_list = [symbolic_acts[-1][i] for i in range(len(symbolic_acts[-1]))]
+		if compact:
+			symbolic_formula_list = list(map(compactify_symbolic_formula, symbolic_formula_list))
+		return symbolic_formula_list, x0
 		
 	def expand_depth(self):
 		'''
