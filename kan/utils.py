@@ -344,7 +344,7 @@ def fit_params(
 	steps=200, lr=1e-1, restarts=5, verbose=True, use_lbfgs=True,
 	device='cpu', dtype=None, eps=1e-12, topk=12,
 	# regularization for (a,b); (c,d) get tiny ridge through OLS
-	reg_type='l2', lam=1e-3, centers=(1.0, 0.0), weights=(1.0, 1.0),
+	reg_type="l2", lam=1e-3, centers=(1.0, 0.0), weights=(1.0, 1.0),
 	# seeding / domain handling
 	grid_scales=(1e-2, 1e-1, 1.0, 10.0, 100.0),
 	grid_bspan_std=2.0, domain_penalty=1e6, seed_random_scale=0.25
