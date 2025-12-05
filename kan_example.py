@@ -105,12 +105,13 @@ def check_gates(model):
 				print(f"{name:>8}  {mp:10.6f}  {c_all:13d}  {c_active:15d}")
 
 gate_top_k = 6
-for i in range(3):
+for i in range(5):
 	# train the model
 	model.fit(dataset, opt="Adam", lr=1e-2, steps=500, lamb=1e-2);
 	model = model.prune(node_th=0.1, edge_th=0, gate_top_k=max(gate_top_k-i,3))
 	# check_gates(model)
 # model.prune_symbolic_gates_topk(k=3)
+model.fit(dataset, opt="Adam", lr=1e-2, steps=500)
 
 print('model.get_symbolic_choice_per_edge:', model.get_symbolic_choice_per_edge())
 
@@ -130,8 +131,8 @@ elif mode == "auto":
 		# verbose=1,
 		lr=1e-2,
 		steps=100,
-		# lamb=1e-2,
-		# node_th=0.1, edge_th=0.1,
+		# lamb=1e-3,
+		# node_th=0.01, edge_th=0,
 		top_k_gates=3
 	)
 	print('auto_symbolic_robust_greedy:', summary)
