@@ -459,6 +459,13 @@ class GatedSymbolicLayer(nn.Module):
 		with torch.no_grad():
 			self.gate_logits += init_atom_bias  # typically 0
 
+		# mask over atoms per edge; 1 = active, 0 = pruned
+		self.register_buffer(
+			"gate_mask",
+			torch.ones(self.out_dim, self.in_dim, self.num_atoms)
+		)
+		self._gate_mask_hook = None
+
 		# per-edge per-atom affine params: [out_dim, in_dim, K, 4] = (a,b,c,d)
 		# these are ONLY USED for symbolic atoms, ignored for numeric ones
 		if self.num_atoms > 0:
@@ -645,9 +652,11 @@ class GatedSymbolicLayer(nn.Module):
 			edge_out = torch.zeros(B, O, I, device=device)
 		else:
 			logits = self.gate_logits / float(temperature)   # [O,I,K]
-			probs  = F.softmax(logits, dim=-1).unsqueeze(0)  # [1,O,I,K]
+			# apply pruning mask – disabled atoms get -inf logits
+			masked_logits = logits.masked_fill(self.gate_mask == 0, float('-inf'))
 
-			edge_out = (sym_vals * probs).sum(dim=-1)        # [B,O,I]
+			probs  = F.softmax(masked_logits, dim=-1).unsqueeze(0)  # [1,O,I,K]
+			edge_out = (sym_vals * probs).sum(dim=-1)               # [B,O,I]
 
 		# 3) apply pruning mask [I,O] -> [O,I]
 		edge_out = edge_out * self.mask.T.unsqueeze(0)       # [B,O,I]
@@ -658,6 +667,78 @@ class GatedSymbolicLayer(nn.Module):
 		postspline = edge_out
 
 		return x_out, preacts, edge_out, postspline
+
+	@torch.no_grad()
+	def prune_gates_topk(
+		self,
+		k: int,
+		symbolic_only: bool = True,
+	):
+		"""
+		For each edge (i->j), keep only top-k atoms (by current logits) and
+		prune the rest by setting gate_mask=0 for them.
+
+		If symbolic_only=True, only consider atoms from base_atom_names
+		(i.e. SYMBOLIC_LIB) and do not count numeric atoms (e.g. stepbf/rbf)
+		towards the top-k.
+		"""
+
+		O, I, K = self.gate_logits.shape
+		device = self.gate_logits.device
+
+		# build index sets once
+		if symbolic_only:
+			symbolic_idxs = [
+				idx for idx, name in enumerate(self.atom_names)
+				if name in self.base_atom_names
+			]
+		else:
+			symbolic_idxs = list(range(K))
+
+		if len(symbolic_idxs) <= k:
+			# nothing to prune on symbolic side
+			return
+
+		mask = self.gate_mask.clone()
+
+		logits = self.gate_logits.detach()
+
+		for j in range(O):
+			for i in range(I):
+				# if that edge is pruned at all, skip
+				if self.mask[i, j] <= 0:
+					continue
+
+				# scores only on symbolic atoms
+				scores = logits[j, i, symbolic_idxs]  # [S]
+
+				# if all zero/very small, we can still pick top-k
+				k_eff = min(k, scores.shape[0])
+				topk = torch.topk(scores, k_eff, dim=-1).indices  # indices into symbolic_idxs
+
+				keep_sym = {symbolic_idxs[idx.item()] for idx in topk}
+
+				# zero out all symbolic atoms except keep_sym
+				for a_idx in symbolic_idxs:
+					if a_idx not in keep_sym:
+						mask[j, i, a_idx] = 0.0
+
+		# update buffer
+		self.gate_mask.copy_(mask)
+
+		# (optional) mask gradients so pruned logits never move again
+		if self._gate_mask_hook is not None:
+			try:
+				self._gate_mask_hook.remove()
+			except Exception:
+				pass
+
+		def _mask_grad(grad):
+			# grad: [O,I,K]
+			return grad * self.gate_mask
+
+		self._gate_mask_hook = self.gate_logits.register_hook(_mask_grad)
+
 
 	# ------------------------------------------------------------------
 	# utilities for pruning / swapping / reading choices
