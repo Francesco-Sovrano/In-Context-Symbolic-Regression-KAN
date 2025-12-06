@@ -102,10 +102,10 @@ model = KAN(
 	# },
 )
 
-model.fit(dataset, opt="Adam", lr=1e-2, steps=1000)
+model.fit(dataset, opt="Adam", lr=1e-2, steps=1000, lamb=1e-3)
 for _ in range(5):
 	model = model.prune(node_th=0.1, edge_th=0)
-	model.fit(dataset, opt="Adam", lr=1e-2, steps=1000)
+	model.fit(dataset, opt="Adam", lr=1e-2, steps=1000, lamb=1e-3)
 	# check_gates(model)
 	print(model.get_symbolic_choice_per_edge())
 
@@ -131,7 +131,7 @@ elif mode == "auto":
 	)
 	print('auto_symbolic_robust_greedy:', summary)
 
-model.fit(dataset, opt="Adam", lr=1e-2, steps=1000)
+model.fit(dataset, opt="Adam", lr=1e-3, steps=1000)
 # model.fit(dataset, opt="LBFGS", lr=1e-1, steps=500, gating_entropy=1e-1)
 # print(model.get_symbolic_choice_per_edge())
 # check_gates(model)
