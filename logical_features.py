@@ -210,10 +210,10 @@ while not symbolic_formula or bad_mape(mape) or mape >= MAPE_THRESHOLD:
 		# },
 	)
 
-	model.fit(dataset, opt="Adam", lr=1e-2, steps=1000, lamb=1e-3)
+	model.fit(dataset, opt="Adam", lr=1e-2, steps=1000)
 	for _ in range(5):
 		model = model.prune(node_th=0.1, edge_th=0)
-		model.fit(dataset, opt="Adam", lr=1e-2, steps=1000, lamb=1e-3)
+		model.fit(dataset, opt="Adam", lr=1e-2, steps=1000)
 		# check_gates(model)
 		print(model.get_symbolic_choice_per_edge())
 	print('model.get_symbolic_choice_per_edge:', model.get_symbolic_choice_per_edge())
@@ -238,7 +238,7 @@ while not symbolic_formula or bad_mape(mape) or mape >= MAPE_THRESHOLD:
 	# if symbolic_formula:
 	# 	print('Symbolic formula:', symbolic_formula[0][0])
 
-	model.fit(dataset, opt="Adam", lr=1e-2, steps=1000)
+	model.fit(dataset, opt="Adam", lr=1e-2, steps=2000)
 	# model.fit(dataset, opt="Adam", lr=1e-2, steps=500, lamb=1e-1)
 	# model = model.prune(node_th=0.01, edge_th=0.01)
 	# model.fit(dataset, opt="Adam", lr=1e-2, steps=500)
