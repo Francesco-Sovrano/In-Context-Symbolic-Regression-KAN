@@ -110,7 +110,7 @@ def time_limit(seconds: float):
 
 
 class MultKAN(nn.Module):
-	def __init__(self, width=None, grid=3, k=3, mult_arity = 2, noise_scale=0.3, scale_base_mu=0.0, scale_base_sigma=1.0, base_fun='silu', affine_trainable=False, grid_eps=0.02, grid_range=[-1, 1], sp_trainable=True, sb_trainable=True, seed=1, save_act=True, sparse_init=False, auto_save=True, first_init=True, ckpt_path='./model', state_id=0, round=0, device='cpu', atom_names=None, spline_weight_init_scale=0.01, numeric_atom_configs=None):
+	def __init__(self, width=None, grid=3, k=3, mult_arity = 2, noise_scale=0.3, scale_base_mu=0.0, scale_base_sigma=1.0, base_fun='silu', affine_trainable=False, grid_eps=0.02, grid_range=[-1, 1], sp_trainable=True, sb_trainable=True, seed=1, save_act=True, sparse_init=False, auto_save=True, first_init=True, ckpt_path='./model', state_id=0, round=0, device='cpu', atom_names=None, spline_weight_init_scale=0.1, numeric_atom_configs=None):
 
 		super(MultKAN, self).__init__()
 
@@ -122,6 +122,12 @@ class MultKAN(nn.Module):
 
 		self.act_fun = []
 		self.depth = len(width) - 1
+
+		# multiplicative strength per layer (start at 0 = no mult influence)
+		# self.mult_alpha = nn.ParameterList([
+		# 	nn.Parameter(torch.tensor(0.0), requires_grad=False)
+		# 	for _ in range(self.depth)
+		# ])
 		
 		#print('haha1', width)
 		for i in range(len(width)):
@@ -832,32 +838,46 @@ class MultKAN(nn.Module):
 				self.acts_premult.append(x.detach())
 			
 			# multiplication
-			dim_sum = self.width[l+1][0]
+			dim_sum  = self.width[l+1][0]
 			dim_mult = self.width[l+1][1]
-			
-			if self.mult_homo == True:
-				for i in range(self.mult_arity-1):
-					if i == 0:
-						x_mult = x[:,dim_sum::self.mult_arity] * x[:,dim_sum+1::self.mult_arity]
-					else:
-						x_mult = x_mult * x[:,dim_sum+i+1::self.mult_arity]
-						
+
+			if self.mult_homo:
+				if dim_mult > 0:
+					# tail shape: [batch, dim_mult * mult_arity]
+					tail = x[:, dim_sum:]                     # [B, dim_mult * mult_arity]
+					B = tail.shape[0]
+					arity = self.mult_arity                  # int
+
+					# reshape to [B, dim_mult, arity]: each mult node has "arity" inputs
+					tail = tail.view(B, dim_mult, arity)
+
+					# choose epsilon (could be per-layer or global; start with small fixed value)
+					eps = getattr(self, "mult_eps", 1)     # or self.mult_eps[l] if per-layer
+
+					# reparameterized product:
+					# h = ((prod_i (1 + eps * f_i)) - 1) / eps
+					g      = 1.0 + eps * tail               # [B, dim_mult, arity]
+					prod_g = g.prod(dim=-1)                 # [B, dim_mult]
+					x_mult = (prod_g - 1.0) / eps           # [B, dim_mult]
+				else:
+					x_mult = None
 			else:
+				# fall back to your existing hetero-arity logic
+				x_mult = None
 				for j in range(dim_mult):
 					acml_id = dim_sum + np.sum(self.mult_arity[l+1][:j])
 					for i in range(self.mult_arity[l+1][j]-1):
 						if i == 0:
-							x_mult_j = x[:,[acml_id]] * x[:,[acml_id+1]]
+							x_mult_j = x[:, [acml_id]] * x[:, [acml_id+1]]
 						else:
-							x_mult_j = x_mult_j * x[:,[acml_id+i+1]]
-							
-					if j == 0:
-						x_mult = x_mult_j
-					else:
-						x_mult = torch.cat([x_mult, x_mult_j], dim=1)
-				
-			if self.width[l+1][1] > 0:
-				x = torch.cat([x[:,:dim_sum], x_mult], dim=1)
+							x_mult_j = x_mult_j * x[:, [acml_id+i+1]]
+					x_mult = x_mult_j if x_mult is None else torch.cat([x_mult, x_mult_j], dim=1)
+
+			if dim_mult > 0:
+				x = torch.cat([x[:, :dim_sum], x_mult], dim=1)
+				# # scale multiplicative part by an annealed scalar mult_alpha[l]
+				# alpha = self.mult_alpha[l]
+				# x = torch.cat([x[:, :dim_sum], alpha * x_mult], dim=1)
 			
 			# x = x + self.biases[l].weight
 			# node affine transform
@@ -1302,7 +1322,7 @@ class MultKAN(nn.Module):
 			plt.gcf().get_axes()[0].text(0.5, (y0+z0) * (len(self.width) - 1) + 0.3, title, fontsize=40 * scale, horizontalalignment='center', verticalalignment='center')
 
 			
-	def reg(self, reg_metric, lamb_l1, lamb_entropy, lamb_coef, lamb_coefdiff, reg_type="l2"):
+	def reg(self, reg_metric, lamb_l1, lamb_entropy, lamb_coef, lamb_coefdiff, reg_type="elasticnet"):
 		"""
 		Numerically robust regularization.
 		If anything goes NaN/inf, we clamp it to 0 so _safe_reg() doesn't see NaNs.
@@ -1333,7 +1353,7 @@ class MultKAN(nn.Module):
 		for l, vec in enumerate(acts_scale):
 			# vec: [out_dim, in_dim]
 			# Clean up NaN/inf right away
-			# vec = torch.nan_to_num(vec, nan=0.0, posinf=0.0, neginf=0.0)
+			vec = torch.nan_to_num(vec, nan=0.0, posinf=0.0, neginf=0.0)
 			vec = vec.abs()
 
 			if vec.numel() == 0:
@@ -1373,9 +1393,9 @@ class MultKAN(nn.Module):
 
 			p_col = torch.clamp(p_col, min=1e-4, max=1.0)
 
-			# # final safety: kill any NaNs that might sneak in
-			# p_row = torch.nan_to_num(p_row, nan=1e-4, posinf=1.0, neginf=1e-4)
-			# p_col = torch.nan_to_num(p_col, nan=1e-4, posinf=1.0, neginf=1e-4)
+			# final safety: kill any NaNs that might sneak in
+			p_row = torch.nan_to_num(p_row, nan=1e-4, posinf=1.0, neginf=1e-4)
+			p_col = torch.nan_to_num(p_col, nan=1e-4, posinf=1.0, neginf=1e-4)
 
 			entropy_row = - torch.mean(torch.sum(p_row * torch.log2(p_row), dim=1))
 			entropy_col = - torch.mean(torch.sum(p_col * torch.log2(p_col), dim=0))
@@ -1403,7 +1423,7 @@ class MultKAN(nn.Module):
 			if coef.numel() == 0:
 				continue
 
-			# coef = torch.nan_to_num(coef, nan=0.0, posinf=0.0, neginf=0.0)
+			coef = torch.nan_to_num(coef, nan=0.0, posinf=0.0, neginf=0.0)
 
 			coeff_l1 = torch.sum(torch.mean(torch.abs(coef), dim=1))
 			if coef.shape[1] > 1:
@@ -1418,7 +1438,7 @@ class MultKAN(nn.Module):
 		return reg_
 
 	
-	def get_reg(self, reg_metric, lamb_l1, lamb_entropy, lamb_coef, lamb_coefdiff, reg_type="l2"):
+	def get_reg(self, reg_metric, lamb_l1, lamb_entropy, lamb_coef, lamb_coefdiff, reg_type="elasticnet"):
 		'''
 		Get regularization. This seems unnecessary but in case a class wants to inherit this, it may want to rewrite get_reg, but not reg.
 		'''
@@ -1435,7 +1455,7 @@ class MultKAN(nn.Module):
 		lamb_coef=0., lamb_coefdiff=0., update_grid=True, grid_update_num=10, loss_fn=None, lr=1.,
 		start_grid_update_step=-1, stop_grid_update_step=50, batch=-1, metrics=None, save_fig=False,
 		in_vars=None, out_vars=None, beta=3, save_fig_freq=1, img_folder='./video',
-		singularity_avoiding=False, y_th=1000., reg_metric='edge_forward_spline_n', reg_type="l2", display_metrics=None, gating_entropy=0.0, gating_l1=0.0):
+		singularity_avoiding=False, y_th=1000., reg_metric='edge_forward_spline_n', reg_type="elasticnet", display_metrics=None, gating_entropy=0.0, gating_l1=0.0):
 
 		"""
 		Numerically robust training loop (Adam/LBFGS) with safe forward/loss/regularizer,
@@ -1690,100 +1710,139 @@ class MultKAN(nn.Module):
 
 
 	def prune_node(self, threshold=1e-2, mode="auto", active_neurons_id=None, log_history=True):
-		'''
-		pruning nodes
+		"""
+		Prune nodes (sum + mult) in a way that keeps the multiplicative
+		structure and indexing consistent.
 
-		Args:
-		-----
-			threshold : float
-				if the attribution score of a neuron is below the threshold, it is considered dead and will be removed
-			mode : str
-				'auto' or 'manual'. with 'auto', nodes are automatically pruned using threshold. with 'manual', active_neurons_id should be passed in.
-			
-		Returns:
-		--------
-			pruned network : MultKAN
+		- Decide which nodes in each layer (except input/output) to keep.
+		- Convert node selection into subnode indices per layer.
+		- Build a new MultKAN and slice all layers accordingly.
+		"""
 
-		Example
-		-------
-		>>> from kan import *
-		>>> model = KAN(width=[2,5,1], grid=5, k=3, noise_scale=0.3, seed=2)
-		>>> f = lambda x: torch.exp(torch.sin(torch.pi*x[:,[0]]) + x[:,[1]]**2)
-		>>> dataset = create_dataset(f, n_var=2)
-		>>> model.fit(dataset, opt='LBFGS', steps=20, lamb=0.001);
-		>>> model = model.prune_node()
-		>>> model.plot()
-		'''
 		if self.acts is None:
 			self.get_act()
-		
-		mask_up = [torch.ones(self.width_in[0], device=self.device)]
-		mask_down = []
-		active_neurons_up = [list(range(self.width_in[0]))]
-		active_neurons_down = []
-		num_sums = []
-		num_mults = []
-		mult_arities = [[]]
-		
+
+		device = self.device
+		depth = self.depth  # number of connection layers
+
 		if active_neurons_id is not None:
 			mode = "manual"
 
-		for i in range(len(self.acts_scale) - 1):
-			
-			mult_arity = []
-			
+		# --- 1) Node-level importance (auto mode) ---
+		if mode == "auto":
+			self.attribute()  # fills self.node_scores
+
+		# --- 2) Active nodes per node-layer (0..depth) ---
+		# active_nodes[l] is a LongTensor of node indices for layer l.
+		active_nodes = [None] * (depth + 1)
+
+		# input layer: keep everything (prune_input handles feature pruning)
+		active_nodes[0] = torch.arange(self.width_in[0], device=device)
+
+		for l in range(1, depth):
+			n_nodes = self.width_in[l]  # = width[l][0] + width[l][1]
+
 			if mode == "auto":
-				self.attribute()
-				overall_important_up = self.node_scores[i+1] > threshold
-				
-			elif mode == "manual":
-				overall_important_up = torch.zeros(self.width_in[i + 1], dtype=torch.bool, device=self.device)
-				overall_important_up[active_neurons_id[i]] = True
-				
-				
-			num_sum = torch.sum(overall_important_up[:self.width[i+1][0]])
-			num_mult = torch.sum(overall_important_up[self.width[i+1][0]:])
-			if self.mult_homo == True:
-				overall_important_down = torch.cat([overall_important_up[:self.width[i+1][0]], (overall_important_up[self.width[i+1][0]:][None,:].expand(self.mult_arity,-1)).T.reshape(-1,)], dim=0)
+				scores = self.node_scores[l]  # [n_nodes]
+				keep = scores > threshold
 			else:
-				overall_important_down = overall_important_up[:self.width[i+1][0]]
-				for j in range(overall_important_up[self.width[i+1][0]:].shape[0]):
-					active_bool = overall_important_up[self.width[i+1][0]+j]
-					arity = self.mult_arity[i+1][j]
-					overall_important_down = torch.cat([overall_important_down, torch.tensor([active_bool]*arity).to(self.device)])
-					if active_bool:
-						mult_arity.append(arity)
-			
-			num_sums.append(num_sum.item())
-			num_mults.append(num_mult.item())
+				keep = torch.zeros(n_nodes, dtype=torch.bool, device=device)
+				keep[active_neurons_id[l - 1]] = True
 
-			mask_up.append(overall_important_up.float())
-			mask_down.append(overall_important_down.float())
+			ids = torch.nonzero(keep, as_tuple=False).squeeze(-1)
+			active_nodes[l] = ids
 
-			active_neurons_up.append(torch.where(overall_important_up == True)[0])
-			active_neurons_down.append(torch.where(overall_important_down == True)[0])
-			
-			mult_arities.append(mult_arity)
+		# output layer: keep all outputs
+		active_nodes[depth] = torch.arange(self.width_in[depth], device=device)
 
-		active_neurons_down.append(list(range(self.width_out[-1])))
-		mask_down.append(torch.ones(self.width_out[-1], device=self.device))
-		
-		if self.mult_homo == False:
-			mult_arities.append(self.mult_arity[-1])
+		# --- 3) New width[] and mult_arity from node selection ---
+		width_new = [copy.deepcopy(self.width[0])]
+		if not self.mult_homo:
+			new_mult_arity = [copy.deepcopy(self.mult_arity[0])]
+		else:
+			new_mult_arity = None
 
-		self.mask_up = mask_up
-		self.mask_down = mask_down
+		for l in range(1, depth):
+			S_old, M_old = self.width[l]   # [#sum_nodes, #mult_nodes]
+			ids = active_nodes[l]
 
-		# update act_fun[l].mask up
-		for l in range(len(self.acts_scale) - 1):
-			for i in range(self.width_in[l + 1]):
-				if i not in active_neurons_up[l + 1]:
-					self.remove_node(l + 1, i, mode='up',log_history=False)
-					
-			for i in range(self.width_out[l + 1]):
-				if i not in active_neurons_down[l]:
-					self.remove_node(l + 1, i, mode='down',log_history=False)
+			if ids.numel() == 0:
+				sum_ids = torch.empty(0, dtype=torch.long, device=device)
+				mult_ids = torch.empty(0, dtype=torch.long, device=device)
+			else:
+				sum_mask  = ids < S_old
+				mult_mask = ~sum_mask
 
+				sum_ids  = ids[sum_mask]            # indices 0..S_old-1
+				mult_ids = ids[mult_mask] - S_old   # indices 0..M_old-1
+
+			num_sum  = int(sum_ids.numel())
+			num_mult = int(mult_ids.numel())
+			width_new.append([num_sum, num_mult])
+
+			if not self.mult_homo:
+				old_ar = self.mult_arity[l]  # list length M_old
+				ar_new = [old_ar[int(m.item())] for m in mult_ids]
+				new_mult_arity.append(ar_new)
+
+		# Last layer: keep original structure (we didn't prune outputs)
+		width_new.append(copy.deepcopy(self.width[-1]))
+		if not self.mult_homo:
+			new_mult_arity.append(copy.deepcopy(self.mult_arity[-1]))
+
+		# --- 4) Active subnodes per connection layer (0..depth-1) ---
+		active_subnodes = [None] * depth
+
+		for l in range(depth - 1):       # connection layers 0..depth-2
+			layer_nodes = l + 1          # node layer whose subnodes we are selecting
+			S_old, M_old = self.width[layer_nodes]
+
+			ids_nodes = active_nodes[layer_nodes]
+			ids_set = set(ids_nodes.tolist())
+
+			out_ids = []
+
+			# sum-node subnodes: index = node index
+			for j in range(S_old):
+				if j in ids_set:
+					out_ids.append(j)
+
+			# mult-node subnodes: contiguous ranges after sums
+			offset = S_old
+			if self.mult_homo:
+				ar = self.mult_arity          # int arity
+				for j_mult in range(M_old):
+					node_idx = S_old + j_mult
+					if node_idx in ids_set:
+						out_ids.extend(range(offset, offset + ar))
+					offset += ar
+			else:
+				for j_mult, ar in enumerate(self.mult_arity[layer_nodes]):
+					node_idx = S_old + j_mult
+					if node_idx in ids_set:
+						out_ids.extend(range(offset, offset + ar))
+					offset += ar
+
+			active_subnodes[l] = torch.as_tensor(out_ids, dtype=torch.long, device=device)
+
+		# Last connection layer: keep all subnodes of final layer
+		active_subnodes[depth - 1] = torch.arange(self.width_out[-1], device=device)
+
+		# Optional: masks for compatibility
+		self.mask_up = []
+		for l in range(depth + 1):
+			m = torch.zeros(self.width_in[l], device=device)
+			m[active_nodes[l]] = 1.0
+			self.mask_up.append(m)
+
+		self.mask_down = []
+		for l in range(depth):
+			w_out_l = self.width_out[l + 1] if l < depth - 1 else self.width_out[-1]
+			m = torch.zeros(w_out_l, device=device)
+			m[active_subnodes[l]] = 1.0
+			self.mask_down.append(m)
+
+		# --- 5) Build a new compact model and slice with get_subset ---
 		model2 = MultKAN(
 			copy.deepcopy(self.width),
 			grid=self.grid,
@@ -1795,64 +1854,68 @@ class MultKAN(nn.Module):
 			first_init=False,
 			state_id=self.state_id,
 			round=self.round,
+			device=self.device,
 			atom_names=self.atom_names,
 			spline_weight_init_scale=self.spline_weight_init_scale,
 			numeric_atom_configs=self.numeric_atom_configs,
 		).to(self.device)
 
 		model2.load_state_dict(self.state_dict())
-		
-		width_new = [self.width[0]]
-		
-		for i in range(len(self.acts_scale)):
-			
-			if i < len(self.acts_scale) - 1:
-				num_sum = num_sums[i]
-				num_mult = num_mults[i]
-				with torch.no_grad():
-					model2.node_bias[i] = nn.Parameter(
-						model2.node_bias[i][active_neurons_up[i+1]].detach().clone(),
-						requires_grad=model2.node_bias[i].requires_grad
-					)
-					model2.node_scale[i] = nn.Parameter(
-						model2.node_scale[i][active_neurons_up[i+1]].detach().clone(),
-						requires_grad=model2.node_scale[i].requires_grad
-					)
-					model2.subnode_bias[i] = nn.Parameter(
-						model2.subnode_bias[i][active_neurons_down[i]].detach().clone(),
-						requires_grad=model2.subnode_bias[i].requires_grad
-					)
-					model2.subnode_scale[i] = nn.Parameter(
-						model2.subnode_scale[i][active_neurons_down[i]].detach().clone(),
-						requires_grad=model2.subnode_scale[i].requires_grad
-					)
-				model2.width[i+1] = [num_sum, num_mult]
-				
-				model2.act_fun[i].out_dim_sum = num_sum
-				model2.act_fun[i].out_dim_mult = num_mult
-				
-				model2.symbolic_fun[i].out_dim_sum = num_sum
-				model2.symbolic_fun[i].out_dim_mult = num_mult
-				
-				width_new.append([num_sum, num_mult])
 
-			model2.act_fun[i] = model2.act_fun[i].get_subset(active_neurons_up[i], active_neurons_down[i])
-			model2.symbolic_fun[i] = self.symbolic_fun[i].get_subset(active_neurons_up[i], active_neurons_down[i])
-			
+		for l in range(depth):
+			in_ids  = active_nodes[l]          # input nodes to this layer
+			out_ids = active_subnodes[l]       # subnodes of layer (l+1)
+
+			if l < depth - 1:
+				# node params correspond to nodes in layer (l+1)
+				nodes_next = active_nodes[l + 1]
+				num_sum, num_mult = width_new[l + 1]
+
+				with torch.no_grad():
+					# node-scale/bias for next layer's nodes
+					model2.node_bias[l] = nn.Parameter(
+						model2.node_bias[l][nodes_next].detach().clone(),
+						requires_grad=model2.node_bias[l].requires_grad,
+					)
+					model2.node_scale[l] = nn.Parameter(
+						model2.node_scale[l][nodes_next].detach().clone(),
+						requires_grad=model2.node_scale[l].requires_grad,
+					)
+					# subnode scale/bias for this layer's subnodes
+					model2.subnode_bias[l] = nn.Parameter(
+						model2.subnode_bias[l][out_ids].detach().clone(),
+						requires_grad=model2.subnode_bias[l].requires_grad,
+					)
+					model2.subnode_scale[l] = nn.Parameter(
+						model2.subnode_scale[l][out_ids].detach().clone(),
+						requires_grad=model2.subnode_scale[l].requires_grad,
+					)
+
+				# update structural metadata
+				model2.width[l + 1] = [num_sum, num_mult]
+				model2.act_fun[l].out_dim_sum = num_sum
+				model2.act_fun[l].out_dim_mult = num_mult
+				model2.symbolic_fun[l].out_dim_sum = num_sum
+				model2.symbolic_fun[l].out_dim_mult = num_mult
+
+			# slice numeric & symbolic layers
+			model2.act_fun[l] = model2.act_fun[l].get_subset(in_ids, out_ids)
+			# note: slice symbolic from *self* (as in your original code)
+			model2.symbolic_fun[l] = self.symbolic_fun[l].get_subset(in_ids, out_ids)
+
 		model2.cache_data = self.cache_data
 		model2.acts = None
-		
-		width_new.append(self.width[-1])
 		model2.width = width_new
-		
-		if self.mult_homo == False:
-			model2.mult_arity = mult_arities
-		
+		if not self.mult_homo:
+			model2.mult_arity = new_mult_arity
+
 		if log_history:
-			self.log_history('prune_node')    
+			self.log_history('prune_node')
 			model2.state_id += 1
-		
+
 		return model2
+
+
 	
 	def prune_edge(self, threshold=3e-2, log_history=True):
 		'''
@@ -2323,16 +2386,14 @@ class MultKAN(nn.Module):
 		data,
 		*,
 		optimizer="Adam",
-		lib=None,                   # list[str] atoms to try; default: all in SYMBOLIC_LIB except '0'
-		min_edge_score=None,        # optional stop if the top score < this
+		lib=None,                   # list[str] atoms to try; default: all in SYMBOLIC_LIB, '0' added if missing
+		min_edge_score=None,        # if top score < this, remaining edges -> '0'
 		layers=None,                # None = all layers; or list[int]
-		weight_simple = 0,
-		verbose=1,                   # 0 quiet, 1 picks only, 2 + details from suggest_symbolic
+		weight_simple=0,
+		verbose=1,                  # 0 quiet, 1 picks only, 2 + details from suggest_symbolic
 		lr=1e-3,
 		steps=200,
 		lamb=0,
-		node_th=0, 
-		edge_th=0,
 		top_k_gates=1,
 		**args
 	):
@@ -2340,18 +2401,22 @@ class MultKAN(nn.Module):
 		Greedy: at each iteration, fix the single most important numeric B-spline edge.
 		Importance defaults to the model's own backward attribution (fast and stable).
 
-		Returns:
-			picks: list of dicts like
-				   {'l': l, 'i': i, 'j': j, 'fun': name, 'r2': float, 'score': float}
+		Behavior of `min_edge_score`:
+		  - While the best edge has score >= min_edge_score:
+			  -> do normal greedy symbolic replacement on that edge.
+		  - Once the best edge has score < min_edge_score:
+			  -> set ALL remaining eligible edges with score < min_edge_score to '0'
+				 and stop.
 		"""
 
 		eval_input = data['train_input']
 		device = self.device if hasattr(self, "device") else eval_input.device
 		X = eval_input.to(device)
 
-		# Default atom library (exclude the zero atom)
+		# Default atom library
 		if lib is None:
-			lib = [k for k in SYMBOLIC_LIB.keys() if k != '0']
+			lib = list(SYMBOLIC_LIB.keys())
+		# we will ensure '0' is present in lib_edge later per edge
 
 		# Which layers to consider
 		Ls = range(self.depth) if layers is None else layers
@@ -2363,56 +2428,80 @@ class MultKAN(nn.Module):
 			i_fn += 1
 
 			# === SCORE ALL CANDIDATE EDGES ===
-			# Uses built-in attribution (fills self.edge_scores per layer: [out_dim, in_dim])
 			self.attribute()
 			layer_scores = [s.detach().clone() for s in self.edge_scores]  # each: (out_dim, in_dim)
-			
+
 			# === FIND THE SINGLE BEST EDGE (global across layers) ===
 			best = None  # (score, l, i, j)
 			for l in Ls:
-				# # Skip gated layers: they are already symbolic/numeric via GatedSymbolicLayer
-				# if isinstance(self.act_fun[l], GatedSymbolicLayer):
-				# 	continue
 				scores = layer_scores[l]                       # (out_dim, in_dim)
 				# numeric candidates only
 				num_mask = (self.act_fun[l].mask > 0).T        # (out_dim, in_dim)
 				# not already symbolic
 				sym_off  = (self.symbolic_fun[l].mask == 0)    # (out_dim, in_dim)
+
 				cand = scores.clone()
 				cand[~num_mask] = -float("inf")
 				cand[~sym_off]  = -float("inf")
 
-				# optionally filter by min_edge_score
-				if min_edge_score is not None:
-					cand[cand < float(min_edge_score)] = -float("inf")
-
-				# pick best (i.e., least important) in this layer
+				# pick best in this layer (no threshold here)
 				val = torch.max(cand)
 				if torch.isfinite(val):
 					j, i = torch.nonzero(cand == val, as_tuple=False)[0]  # first argmax
-					# if isinstance(self.act_fun[l], GatedSymbolicLayer):
-					# 	gate_layer = self.act_fun[l]
-					# 	edge_choices = gate_layer.get_symbolic_choices()
-					# 	# print(edge_choices[(j, i)])
-					# 	if edge_choices[(j, i)] not in GatedSymbolicLayer.numeric_layers:
-					# 		continue
 					s = float(val.item())
 					if (best is None) or (s > best[0]):
 						best = (s, l, int(i.item()), int(j.item()))
 
 			if best is None:
 				if verbose >= 1:
-					print("[greedy] No eligible numeric edges remain (or below threshold). Stop.")
+					print("[greedy] No eligible numeric edges remain. Stop.")
 				nothing_left = True
 				break
 
 			score, l, i, j = best
 
+			# === If best score is below min_edge_score: zero out all remaining low-score edges ===
+			if (min_edge_score is not None) and (score < float(min_edge_score)):
+				thr = float(min_edge_score)
+				if verbose >= 1:
+					print(f"[greedy] best score {score:.3e} < min_edge_score={thr:.3e}."
+						  " Mapping remaining low-score edges to '0' and stopping.")
+
+				for l2 in Ls:
+					scores2 = layer_scores[l2]
+					num_mask2 = (self.act_fun[l2].mask > 0).T
+					sym_off2  = (self.symbolic_fun[l2].mask == 0)
+
+					low_mask = (scores2 < thr) & num_mask2 & sym_off2
+					js, is_ = torch.nonzero(low_mask, as_tuple=True)
+
+					for j2, i2 in zip(js.tolist(), is_.tolist()):
+						s_edge = float(scores2[j2, i2].item())
+						self.fix_symbolic(
+							l2, int(i2), int(j2), '0',
+							fit_params_bool=False,
+							verbose=(verbose >= 2),
+							log_history=False
+						)
+						picks.append({
+							'l': l2,
+							'i': int(i2),
+							'j': int(j2),
+							'fun': '0',
+							'loss': None,
+							'score': s_edge
+						})
+
+				# no more greedy steps after this
+				break
+
+			# Otherwise, proceed with standard greedy replacement for this single edge
 			if verbose >= 1:
 				print(f"[greedy] step {i_fn}: pick edge (l={l}, i={i}, j={j}) with score={score:.3e}")
 
 			best_function = None
 			best_loss = float('inf')
+
 			# --- build edge-specific library ordering using gating ---
 			if isinstance(self.act_fun[l], GatedSymbolicLayer):
 				gate_layer = self.act_fun[l]
@@ -2421,21 +2510,23 @@ class MultKAN(nn.Module):
 				probs_edge  = torch.softmax(logits_edge, dim=-1)
 
 				atom_order = torch.argsort(probs_edge, descending=True).tolist()
-				# Build a gated ordering of names that also exist in 'lib'
+				# gated ordering of names that also exist in 'lib'
 				lib_edge = [
 					gate_layer.atom_names[k_idx]
 					for k_idx in atom_order[:top_k_gates]
-					# if gate_layer.atom_names[k_idx] in GatedSymbolicLayer.numeric_layers
 				]
 				if any(map(lambda x: x in GatedSymbolicLayer.numeric_layers, lib_edge)):
 					lib_edge = lib
-					# assert False
 			else:
 				# fall back to global lib
 				lib_edge = lib
 
 			if not lib_edge:
 				raise RuntimeError('No symbolic functions to map')
+
+			# make sure '0' exists so edges can be "removed" symbolically
+			if '0' not in lib_edge:
+				lib_edge = list(lib_edge) + ['0']
 
 			# --- search over this edge-specific lib ---
 			if len(lib_edge) == 1:
@@ -2455,30 +2546,34 @@ class MultKAN(nn.Module):
 							best_loss = results['train_loss'][-1]
 							best_function = fun_name
 
-			# commit winner
+			# commit winner (fallback to '0' if anything goes wrong)
 			if not best_function:
 				best_function = '0'
-				self.fix_symbolic(l, i, j, '0', fit_params_bool=False, verbose=(verbose>=2), log_history=False)
-			else:
-				self.fix_symbolic(l, i, j, best_function, fit_params_bool=False, verbose=(verbose>=2), log_history=False)
+
+			self.fix_symbolic(
+				l, i, j, best_function,
+				fit_params_bool=False,
+				verbose=(verbose >= 2),
+				log_history=False
+			)
+
 			picks.append({
-				'l': l, 
-				'i': i, 
-				'j': j, 
-				'fun': best_function, 
+				'l': l,
+				'i': i,
+				'j': j,
+				'fun': best_function,
 				'loss': best_loss,
 				'score': score
 			})
+
+			# re-fit after committing this edge
 			self.fit(data, opt=optimizer, lr=lr, steps=steps, lamb=lamb)
-			if node_th or edge_th:
-				self = self.prune(node_th=node_th, edge_th=edge_th)
-			# # Forward once per iteration to refresh acts/scales on the current model
-			# self.get_act(self.cache_data)
+			# no structural pruning: "removal" is via fun='0'
 
 		# housekeeping
 		self.log_history('auto_symbolic_robust_greedy')
-		# self.save_act = save_before
-		return self, picks
+		return picks
+
 
 	def symbolic_formula(self, var=None, normalizer=None, output_normalizer=None, simplify=False, compact=True):
 		symbolic_acts = []
