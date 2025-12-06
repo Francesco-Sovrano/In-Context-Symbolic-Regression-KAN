@@ -91,7 +91,7 @@ lib = ['0', 'x','x^2','x^3','x^4','exp','log','sqrt','tanh','sin','abs']
 
 # plot KAN at initialization
 model = KAN(
-	width=[2, [5,5], 1], 
+	width=[2, 50, 1], 
 	grid=50, 
 	grid_range=f_range,
 	seed=0,
@@ -102,11 +102,10 @@ model = KAN(
 	# },
 )
 
-model.fit(dataset, opt="Adam", lr=1e-2, steps=1000, lamb=1e-3)
-for i in range(5):
-	model.mult_eps = min(1, (1/4)*i)
+model.fit(dataset, opt="Adam", lr=1e-2, steps=1000)
+for _ in range(5):
 	model = model.prune(node_th=0.1, edge_th=0)
-	model.fit(dataset, opt="Adam", lr=1e-2, steps=1000, lamb=1e-3)
+	model.fit(dataset, opt="Adam", lr=1e-2, steps=1000)
 	# check_gates(model)
 	print(model.get_symbolic_choice_per_edge())
 
@@ -132,7 +131,7 @@ elif mode == "auto":
 	)
 	print('auto_symbolic_robust_greedy:', summary)
 
-model.fit(dataset, opt="Adam", lr=1e-3, steps=1000)
+model.fit(dataset, opt="Adam", lr=1e-2, steps=1000)
 # model.fit(dataset, opt="LBFGS", lr=1e-1, steps=500, gating_entropy=1e-1)
 # print(model.get_symbolic_choice_per_edge())
 # check_gates(model)
