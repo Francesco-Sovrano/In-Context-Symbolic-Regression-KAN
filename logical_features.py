@@ -82,8 +82,8 @@ torch.manual_seed(0)
 #################################################################
 
 # f = (0.5*x0 + 0.1*x1) + step(x0 - c) * (1.5*x0 + 0.9*x1)
-f = lambda x: torch.where(x[:,[0]] > 0.6, 2.0 * x[:,[0]] + x[:,[1]], 0.5 * x[:,[0]] + 0.1 * x[:,[1]])
-# f = lambda x: 2.0 * x[:,[0]] + x[:,[1]]*x[:,[0]]
+# f = lambda x: torch.where(x[:,[0]] > 0.6, 2.0 * x[:,[0]] + x[:,[1]], 0.5 * x[:,[0]] + 0.1 * x[:,[1]])
+f = lambda x: 2.0 * x[:,[0]] + x[:,[1]]*x[:,[0]]
 f_range=[-1,1]
 dataset = create_dataset(f, n_var=2, ranges=f_range, train_num=2000, test_num=1000)
 
@@ -200,45 +200,54 @@ while not symbolic_formula or bad_mape(mape) or mape >= MAPE_THRESHOLD:
 	# model
 	model = KAN(
 		width=[2, [5,3], 1], 
-		grid=50, 
+		grid=20, 
 		seed=i,
 		grid_range=f_range,
+		# atom_names=safe_lib,
+		# numeric_atom_configs={
+		# 	"stepbf": {"num_grids": 20, "steepness": 10.},
+		# 	"rbf": {"num_grids": 50},
+		# },
 	)
 
-	for _ in range(2):
-		# train the model
-		model.fit(dataset, opt="Adam", lr=1e-2, steps=1000, lamb=1e-2);
+	model.fit(dataset, opt="Adam", lr=1e-2, steps=1000, lamb=1e-3)
+	for _ in range(5):
 		model = model.prune(node_th=0.1, edge_th=0)
+		model.fit(dataset, opt="Adam", lr=1e-2, steps=1000, lamb=1e-3)
+		# check_gates(model)
+		print(model.get_symbolic_choice_per_edge())
+	print('model.get_symbolic_choice_per_edge:', model.get_symbolic_choice_per_edge())
 
-	# model = model.refine(30)
-	model.fit(dataset, opt="Adam", lr=1e-2, steps=5000)
+	# # model = model.refine(30)
+	# model.fit(dataset, opt="Adam", lr=1e-2, steps=5000)
+	# print('model.get_symbolic_choice_per_edge:', model.get_symbolic_choice_per_edge())
 
+	# model.prune_symbolic_gates_topk(k=3)
 	summary = model.auto_symbolic_robust_greedy(
 		dataset,       # evaluation set
 		lib=safe_lib,
-		min_edge_score=None,
-		mode="backward",
-		weight_simple=0,
+		min_edge_score=0.1,
+		# weight_simple=0,
 		lr=1e-2,
 		steps=100,
-		lamb=1e-2,
-		node_th=0.5, edge_th=0.1,
+		top_k_gates=3
 	)
-	print('auto_symbolic_robust_greedy:', summary)
+	# print('auto_symbolic_robust_greedy:', summary)
+
+	# symbolic_formula = model.symbolic_formula(simplify=SIMPLIFY)
+	# if symbolic_formula:
+	# 	print('Symbolic formula:', symbolic_formula[0][0])
+
+	model.fit(dataset, opt="Adam", lr=1e-2, steps=1000)
+	# model.fit(dataset, opt="Adam", lr=1e-2, steps=500, lamb=1e-1)
+	# model = model.prune(node_th=0.01, edge_th=0.01)
+	# model.fit(dataset, opt="Adam", lr=1e-2, steps=500)
+	print('model.get_symbolic_choice_per_edge:', model.get_symbolic_choice_per_edge())
 
 	symbolic_formula = model.symbolic_formula(simplify=SIMPLIFY)
 	if symbolic_formula:
 		symbolic_formula = symbolic_formula[0][0]
-		print('Symbolic formula:', re.sub(r'(\d+\.\d\d\d\d)\d+', r'\1', str(symbolic_formula)))
-
-	model.fit(dataset, opt="Adam", lr=1e-2, steps=500, lamb=1e-1)
-	model = model.prune(node_th=0.1, edge_th=0)
-	model.fit(dataset, opt="Adam", lr=1e-2, steps=500)
-
-	symbolic_formula = model.symbolic_formula(simplify=SIMPLIFY)
-	if symbolic_formula:
-		symbolic_formula = symbolic_formula[0][0]
-		print('Symbolic formula:', re.sub(r'(\d+\.\d\d\d\d)\d+', r'\1', str(symbolic_formula)))
+		print('Symbolic formula:', symbolic_formula)
 		if str(symbolic_formula) == 'nan':
 			symbolic_formula = None
 
