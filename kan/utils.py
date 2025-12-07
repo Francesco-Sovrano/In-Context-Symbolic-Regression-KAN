@@ -201,6 +201,7 @@ SYMBOLIC_LIB = {
 	'arctanh':     (lambda x: _safe_arctanh(x),    lambda x: sympy.atanh(x),    4, f_arctanh),
 
 	'0':           (lambda x: x*0, lambda x: x*0,       0, None),
+	'1':           (lambda x: x*0+1, lambda x: x*0+1,       0, None),
 
 	'gaussian':    (lambda x: _safe_exp(-x**2),    lambda x: sympy.exp(-x**2), 3, lambda x, y_th: f_exp(-x**2, y_th)),
 	# 'cosh':      (lambda x: torch.cosh(x), lambda x: sympy.cosh(x), 5),
