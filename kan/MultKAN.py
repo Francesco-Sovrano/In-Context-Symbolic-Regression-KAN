@@ -2527,6 +2527,8 @@ class MultKAN(nn.Module):
 			# make sure '0' exists so edges can be "removed" symbolically
 			if '0' not in lib_edge:
 				lib_edge = list(lib_edge) + ['0']
+			if '1' not in lib_edge:
+				lib_edge = list(lib_edge) + ['1']
 
 			# --- search over this edge-specific lib ---
 			if len(lib_edge) == 1:
