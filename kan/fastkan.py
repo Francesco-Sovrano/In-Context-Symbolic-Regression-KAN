@@ -44,7 +44,6 @@ class StepBasisFunction(nn.Module):
 		# basis_j(x) = sigmoid(k * (x - c_j))
 		return torch.sigmoid(self.k * (x[..., None] - self.grid))
 
-
 class RadialBasisFunction(nn.Module):
 	def __init__(
 		self,
@@ -81,6 +80,78 @@ class RadialBasisFunction(nn.Module):
 		den = self.denominator
 		return torch.exp(-((x[..., None] - self.grid) / den) ** 2)
 
+class RationalBasisFunction(nn.Module):
+	"""
+	Rational basis used by RationalKANLayer.
+
+	For each basis index b we learn two polynomials:
+	  P_b(x) = sum_{k=0}^{deg_num}   alpha[b,k] * x^k
+	  Q_b(x) = sum_{k=0}^{deg_den}   beta[b,k]  * x^k
+
+	and define the scalar basis function
+	  phi_b(x) = P_b(x) / (1 + |Q_b(x)|)
+
+	This is evaluated element-wise on x and returns [..., I, num_bases].
+	"""
+
+	def __init__(
+		self,
+		num_bases: int = 8,
+		degree_numerator: int = 3,
+		degree_denominator: int = 2,
+		**args
+	):
+		super().__init__()
+		# num_bases = num_grids
+		self.grid = nn.Parameter(
+			torch.linspace(-1., 1., num_bases),
+			requires_grad=False,
+		)
+
+		assert num_bases > 0
+		assert degree_numerator >= 0
+		assert degree_denominator >= 0
+
+		self.num_bases = num_bases
+		self.deg_num = degree_numerator
+		self.deg_den = degree_denominator
+
+		# coefficients for P_b and Q_b
+		# shapes: [B, deg+1], where B = num_bases
+		self.alpha = nn.Parameter(torch.empty(num_bases, degree_numerator + 1))
+		self.beta  = nn.Parameter(torch.empty(num_bases, degree_denominator + 1))
+
+		self.reset_parameters()
+
+	def reset_parameters(self) -> None:
+		# Small initialization so activations stay in a reasonable range
+		nn.init.trunc_normal_(self.alpha, mean=0.0, std=0.2)
+		nn.init.trunc_normal_(self.beta,  mean=0.0, std=0.2)
+
+	def forward(self, x: torch.Tensor) -> torch.Tensor:
+		"""
+		x: [..., I]
+		return: [..., I, num_bases]
+		"""
+		x = x.to(self.alpha.dtype)
+
+		# powers: x^0, x^1, ..., x^K
+		max_deg = max(self.deg_num, self.deg_den)
+		powers = [torch.ones_like(x)]
+		for _ in range(1, max_deg + 1):
+			powers.append(powers[-1] * x)
+		x_powers = torch.stack(powers, dim=-1)      # [..., I, K+1]
+
+		# numerator P_b(x)
+		num_terms = x_powers[..., : self.deg_num + 1]              # [..., I, deg_num+1]
+		num = torch.einsum('...id,bd->...ib', num_terms, self.alpha)  # [..., I, B]
+
+		# denominator 1 + |Q_b(x)|
+		den_terms = x_powers[..., : self.deg_den + 1]
+		den_poly = torch.einsum('...id,bd->...ib', den_terms, self.beta)  # [..., I, B]
+		den = 1.0 + den_poly.abs()
+
+		return num / den
 
 class FastKANLayer(nn.Module):
 	"""
@@ -108,12 +179,12 @@ class FastKANLayer(nn.Module):
 		self.num_grids = num_grids
 
 		self.layernorm = nn.LayerNorm(input_dim)
-		self.rbf = StepBasisFunction(
+		self.rbf = RadialBasisFunction(
 			grid_min=grid_min,
 			grid_max=grid_max,
 			num_grids=num_grids,
 			train_grid=train_grid,
-			# train_denominator=train_denominator,
+			train_denominator=train_denominator,
 			# train_steepness=train_steepness # optional
 		)
 		self.spline_linear = SplineLinear(
@@ -376,8 +447,9 @@ class FastKAN(nn.Module):
 		return x
 
 NUMERIC_ATOM_FNS = {
-	"stepbf": StepBasisFunction,
-	"rbf": RadialBasisFunction,
+	"step_bf": StepBasisFunction,
+	"radial_bf": RadialBasisFunction,
+	"rational_bf": RationalBasisFunction,
 }
 
 class GatedSymbolicLayer(nn.Module):
@@ -405,7 +477,7 @@ class GatedSymbolicLayer(nn.Module):
 		*,
 		init_atom_bias: float = 0.0,
 		symbolic_scale: float = 1.0,
-		# fn_name -> kwargs, e.g. {"stepbf": {...}, "rbf": {...}}
+		# fn_name -> kwargs, e.g. {"step_bf": {...}, "rbf": {...}}
 		numeric_atom_configs: Optional[Dict[str, Dict[str, Any]]] = None,
 		**args,
 	):
@@ -422,25 +494,36 @@ class GatedSymbolicLayer(nn.Module):
 		else:
 			self._numeric_atom_configs = {}
 
-		# For each numeric fn_name we create a separate module per edge (j,i)
-		# numeric_atoms[fn_name] : ModuleList length (out_dim * in_dim)
+		# For each numeric fn_name we create:
+		#   - one shared basis module (self.numeric_atoms[fn_name])
+		#   - per-edge coefficients in self.numeric_coefs[fn_name] with shape [out_dim, in_dim, G]
 		self.numeric_atoms = nn.ModuleDict()
-		numeric_names: List[str] = []
-		for fn_name, kwargs in self._numeric_atom_configs.items():
-			if fn_name not in NUMERIC_ATOM_FNS:
-				raise ValueError(
-					f"Unknown numeric atom type '{fn_name}'. "
-					f"Known types: {list(NUMERIC_ATOM_FNS.keys())}"
-				)
+		# fn_name -> per-edge coefficients over the basis grid
+		self.numeric_coefs = nn.ParameterDict()
+
+		numeric_names = []
+		for fn_name, cfg in self._numeric_atom_configs.items():
+			cfg = cfg.copy()
 			basis_cls = NUMERIC_ATOM_FNS[fn_name]
-			modules = nn.ModuleList(
-				[basis_cls(**kwargs) for _ in range(self.out_dim * self.in_dim)]
-			)
-			self.numeric_atoms[fn_name] = modules
+			basis = basis_cls(**cfg)                     # e.g. StepBasisFunction
+
+			self.numeric_atoms[fn_name] = basis          # one per atom type, not per edge
+
+			# Determine grid size G from the basis output
+			with torch.no_grad():
+				dummy = torch.zeros(1, self.in_dim, device=self.gate_logits.device if hasattr(self, "gate_logits") else "cpu")
+				G = basis(dummy).shape[-1]               # basis(dummy): [1, in_dim, G]
+
+			# Per-edge coefficients: [out_dim, in_dim, G]
+			coef = nn.Parameter(torch.empty(self.out_dim, self.in_dim, G))
+			# Reasonable init; you can tweak scale if you want
+			nn.init.trunc_normal_(coef, mean=0.0, std=0.1)
+			self.numeric_coefs[fn_name] = coef
+
 			numeric_names.append(fn_name)
 
-		# Full list of atoms (including optional numeric atoms)
-		self.atom_names = self.base_atom_names + numeric_names
+		# Final atom name list (symbolic + numeric)
+		self.atom_names = list(self.base_atom_names) + numeric_names
 		self.num_atoms = len(self.atom_names)
 
 		# simple LN over inputs for "preacts"
@@ -553,34 +636,10 @@ class GatedSymbolicLayer(nn.Module):
 		arg = a_b * pre_exp + b_b       # [B,O,I,K]
 		sym_vals = torch.zeros(B, O, I, K, device=device)
 
-		for k_idx, name in enumerate(self.atom_names):
-			# ---------- NUMERIC ATOMS (no a,b,c,d, separate function per edge) ----------
-			if name in self.numeric_atoms:
-				modules = self.numeric_atoms[name]   # ModuleList length O*I
-				# iterate edges (j,i)
-				for j in range(O):
-					for i in range(I):
-						edge_idx = j * I + i
-						basis = modules[edge_idx]
-						xin = pre[:, i]       # [B]
-						v_ji = basis(xin)     # [B] or [B,G] or [B,1,G]
+		# ---------------- SYMBOLIC ATOMS ----------------
+		num_sym = len(self.base_atom_names)
 
-						# reduce grid dimension if present
-						if v_ji.ndim == 3:         # [B,1,G] or [..., I, G] with I==1
-							v_ji = v_ji.mean(dim=-1)   # -> [B,1]
-						if v_ji.ndim == 2:         # [B,G] or [B,1]
-							v_ji = v_ji.mean(dim=-1)   # -> [B]
-						if v_ji.ndim != 1:
-							raise RuntimeError(
-								f"Numeric atom '{name}' per-edge module returned shape {v_ji.shape}, "
-								"expected [B], [B,G] or [B,1,G]."
-							)
-
-						v_ji = torch.nan_to_num(v_ji, nan=0.0, posinf=1e3, neginf=-1e3)
-						sym_vals[:, j, i, k_idx] = v_ji
-				continue
-
-			# ---------- SYMBOLIC ATOMS (with a,b,c,d) ----------
+		for k_idx, name in enumerate(self.base_atom_names):
 			arg_k = arg[..., k_idx]             # [B,O,I]
 			torch_fun = SYMBOLIC_LIB[name][0]
 
@@ -606,9 +665,22 @@ class GatedSymbolicLayer(nn.Module):
 
 			sym_vals[..., k_idx] = d_k + c_k * v
 
+		# ---------------- NUMERIC ATOMS ----------------
+		offset = num_sym
+		for k, name in enumerate(self._numeric_atom_configs.keys()):
+			# shared basis for this numeric atom type
+			basis = self.numeric_atoms[name](pre)     # [B, in_dim, G]
+			coef  = self.numeric_coefs[name]          # [out_dim, in_dim, G]
+
+			# vals[b, o, i] = sum_g basis[b, i, g] * coef[o, i, g]
+			atom_vals = torch.einsum("big,oig->boi", basis, coef)
+
+			sym_vals[:, :, :, offset + k] = atom_vals
+
 		sym_vals = torch.nan_to_num(sym_vals, nan=0.0, posinf=1e3, neginf=-1e3)
 		sym_vals = self.symbolic_scale * sym_vals
 		return sym_vals   # [B,O,I,K]
+
 
 	# ------------------------------------------------------------------
 	# forward: KAN-compatible signature
@@ -679,7 +751,7 @@ class GatedSymbolicLayer(nn.Module):
 		prune the rest by setting gate_mask=0 for them.
 
 		If symbolic_only=True, only consider atoms from base_atom_names
-		(i.e. SYMBOLIC_LIB) and do not count numeric atoms (e.g. stepbf/rbf)
+		(i.e. SYMBOLIC_LIB) and do not count numeric atoms (e.g. step_bf/rbf)
 		towards the top-k.
 		"""
 
@@ -815,17 +887,19 @@ class GatedSymbolicLayer(nn.Module):
 		if self.num_atoms > 0:
 			new.gate_logits.copy_(self.gate_logits[out_ids][:, in_ids, :])
 			new.affine.copy_(self.affine[out_ids][:, in_ids, :, :])
+			new.gate_mask.copy_(self.gate_mask[out_ids][:, in_ids, :])
 
-		# numeric atom params: remap per-edge
-		old_I = self.in_dim
-		new_I = new.in_dim
-		for name, modules in self.numeric_atoms.items():
-			new_modules = new.numeric_atoms[name]
-			for new_j, j_orig in enumerate(out_ids.tolist()):
-				for new_i, i_orig in enumerate(in_ids.tolist()):
-					old_idx = j_orig * old_I + i_orig
-					new_idx = new_j * new_I + new_i
-					new_modules[new_idx].load_state_dict(modules[old_idx].state_dict())
+		# --- numeric atoms: shared basis + per-edge coefficients ---
+		for name, basis in self.numeric_atoms.items():
+			# basis is shared across all edges ⇒ just copy the entire module
+			new_basis = new.numeric_atoms[name]
+			new_basis.load_state_dict(basis.state_dict())
+
+			# subset the coefficient tensor: [out_dim, in_dim, G] -> [new_out, new_in, G]
+			coef     = self.numeric_coefs[name]        # [old_O, old_I, G]
+			new_coef = new.numeric_coefs[name]         # [new_O, new_I, G]
+
+			new_coef.data.copy_(coef.data[out_ids][:, in_ids, :])
 
 		# meta
 		new.out_dim_sum = out_ids.numel()
@@ -850,22 +924,18 @@ class GatedSymbolicLayer(nn.Module):
 			if self.num_atoms > 0:
 				self.affine[:, [i1, i2], :, :] = self.affine[:, [i2, i1], :, :]
 
+			# gate_mask should follow the same permutation
+			self.gate_mask[:, [i1, i2], :] = self.gate_mask[:, [i2, i1], :]
+
 			# layernorm params
 			lnw = self.layernorm.weight.data
 			lnb = self.layernorm.bias.data
 			lnw[[i1, i2]] = lnw[[i2, i1]]
 			lnb[[i1, i2]] = lnb[[i2, i1]]
 
-			# numeric atoms: swap per-edge along input index
-			I = self.in_dim
-			for name, modules in self.numeric_atoms.items():
-				for j in range(self.out_dim):
-					idx1 = j * I + i1
-					idx2 = j * I + i2
-					st1 = modules[idx1].state_dict()
-					st2 = modules[idx2].state_dict()
-					modules[idx1].load_state_dict(st2)
-					modules[idx2].load_state_dict(st1)
+			# numeric coefs: swap along input index
+			for name, coef in self.numeric_coefs.items():   # [O, I, G]
+				coef.data[:, [i1, i2], :] = coef.data[:, [i2, i1], :]
 
 		else:  # mode == "out"
 			self.mask[:, [i1, i2]] = self.mask[:, [i2, i1]]
@@ -874,19 +944,15 @@ class GatedSymbolicLayer(nn.Module):
 			if self.num_atoms > 0:
 				self.affine[[i1, i2], :, :, :] = self.affine[[i2, i1], :, :, :]
 
+			# gate_mask follow outputs as well
+			self.gate_mask[[i1, i2], :, :] = self.gate_mask[[i2, i1], :, :]
+
 			# keep scale_* in sync with outputs (for consistency)
 			sb = self.scale_base.data
 			sp = self.scale_sp.data
 			sb[[i1, i2]] = sb[[i2, i1]]
 			sp[[i1, i2]] = sp[[i2, i1]]
 
-			# numeric atoms: swap per-edge along output index
-			I = self.in_dim
-			for name, modules in self.numeric_atoms.items():
-				for i in range(self.in_dim):
-					idx1 = i1 * I + i
-					idx2 = i2 * I + i
-					st1 = modules[idx1].state_dict()
-					st2 = modules[idx2].state_dict()
-					modules[idx1].load_state_dict(st2)
-					modules[idx2].load_state_dict(st1)
+			# numeric coefs: swap along output index
+			for name, coef in self.numeric_coefs.items():   # [O, I, G]
+				coef.data[[i1, i2], :, :] = coef.data[[i2, i1], :, :]
