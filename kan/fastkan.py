@@ -477,6 +477,8 @@ class GatedSymbolicLayer(nn.Module):
 		*,
 		init_atom_bias: float = 0.0,
 		symbolic_scale: float = 1.0,
+		use_base_update: bool = True,
+		base_activation = F.silu,
 		# fn_name -> kwargs, e.g. {"step_bf": {...}, "rbf": {...}}
 		numeric_atom_configs: Optional[Dict[str, Dict[str, Any]]] = None,
 		**args,
@@ -487,6 +489,12 @@ class GatedSymbolicLayer(nn.Module):
 		self.out_dim = output_dim
 		self.base_atom_names = list(atom_names)          # atoms from SYMBOLIC_LIB
 		self.symbolic_scale = symbolic_scale
+
+		self.use_base_update = use_base_update
+		if use_base_update:
+			self.base_activation = base_activation
+			# bias=False so we can decompose per edge like FastKANLayer
+			self.base_linear = nn.Linear(input_dim, output_dim, bias=False)
 
 		# ---- numeric atoms configuration ----
 		if numeric_atom_configs is not None:
@@ -730,6 +738,13 @@ class GatedSymbolicLayer(nn.Module):
 			probs  = F.softmax(masked_logits, dim=-1).unsqueeze(0)  # [1,O,I,K]
 			edge_out = (sym_vals * probs).sum(dim=-1)               # [B,O,I]
 
+		# 2b) optional base_update like FastKANLayer
+		if self.use_base_update:
+			base_hidden = self.base_activation(x)           # [B,I]
+			W_base = self.base_linear.weight               # [O,I]
+			base_per_edge = torch.einsum("bi,oi->boi", base_hidden, W_base)
+			edge_out = edge_out + base_per_edge            # [B,O,I]
+
 		# 3) apply pruning mask [I,O] -> [O,I]
 		edge_out = edge_out * self.mask.T.unsqueeze(0)       # [B,O,I]
 
@@ -873,8 +888,14 @@ class GatedSymbolicLayer(nn.Module):
 			atom_names=self.base_atom_names,
 			init_atom_bias=0.0,
 			symbolic_scale=self.symbolic_scale,
+			use_base_update=self.use_base_update,
+			base_activation=getattr(self, "base_activation", F.silu),
 			numeric_atom_configs=self._numeric_atom_configs,
 		).to(self.mask.device)
+
+		# base_update weights (if enabled)
+		if self.use_base_update:
+			new.base_linear.weight.copy_(self.base_linear.weight[out_ids][:, in_ids])
 
 		# mask
 		new.mask.copy_(self.mask[in_ids][:, out_ids])
@@ -937,6 +958,10 @@ class GatedSymbolicLayer(nn.Module):
 			for name, coef in self.numeric_coefs.items():   # [O, I, G]
 				coef.data[:, [i1, i2], :] = coef.data[:, [i2, i1], :]
 
+			# base_update: swap input dimension
+			if self.use_base_update:
+				self.base_linear.weight[:, [i1, i2]] = self.base_linear.weight[:, [i2, i1]]
+
 		else:  # mode == "out"
 			self.mask[:, [i1, i2]] = self.mask[:, [i2, i1]]
 
@@ -956,3 +981,7 @@ class GatedSymbolicLayer(nn.Module):
 			# numeric coefs: swap along output index
 			for name, coef in self.numeric_coefs.items():   # [O, I, G]
 				coef.data[[i1, i2], :, :] = coef.data[[i2, i1], :, :]
+
+			# base_update: swap output dimension
+			if self.use_base_update:
+				self.base_linear.weight[[i1, i2], :] = self.base_linear.weight[[i2, i1], :]

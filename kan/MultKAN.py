@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import numpy as np
-# from .KANLayer import KANLayer
+from .KANLayer import KANLayer
 from .fastkan import FastKANLayer as KANLayer, GatedSymbolicLayer
 #from .Symbolic_MultKANLayer import *
 from .Symbolic_KANLayer import Symbolic_KANLayer
@@ -37,45 +37,83 @@ def compactify_symbolic_formula(f):
 
 @contextlib.contextmanager
 def _model_snapshot(model):
-	# weights/buffers (to CPU to save GPU mem)
+	# ---------- 1) Save weights/buffers (to CPU to save GPU mem) ----------
 	state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
 
-	# training/eval flag + a couple of attrs you toggle
+	# ---------- 2) Save training/eval flag + attrs you toggle ----------
 	mode = model.training
 	save_act0  = getattr(model, "save_act", True)
 	auto_save0 = getattr(model, "auto_save", True)
 
-	# RNG states for determinism across candidates
+	# ---------- 3) RNG states for determinism across candidates ----------
 	torch_state = torch.random.get_rng_state()
 	cuda_state  = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
 	np_state    = np.random.get_state()
 	py_state    = random.getstate()
 
-	cache_data = model.cache_data
-	acts = model.acts[:]
-	acts_premult = model.acts_premult[:]
-	spline_preacts = model.spline_preacts[:]
-	spline_postsplines = model.spline_postsplines[:]
-	spline_postacts = model.spline_postacts[:]
-	acts_scale = model.acts_scale[:]
-	acts_scale_spline = model.acts_scale_spline[:]
-	subnode_actscale = model.subnode_actscale[:]
-	edge_actscale = model.edge_actscale[:]
+	# ---------- 4) Cache forward-time buffers ----------
+	cache_data = getattr(model, "cache_data", None)
+	acts = getattr(model, "acts", [])[:]
+	acts_premult = getattr(model, "acts_premult", [])[:]
+	spline_preacts = getattr(model, "spline_preacts", [])[:]
+	spline_postsplines = getattr(model, "spline_postsplines", [])[:]
+	spline_postacts = getattr(model, "spline_postacts", [])[:]
+	acts_scale = getattr(model, "acts_scale", [])[:]
+	acts_scale_spline = getattr(model, "acts_scale_spline", [])[:]
+	subnode_actscale = getattr(model, "subnode_actscale", [])[:]
+	edge_actscale = getattr(model, "edge_actscale", [])[:]
+
+	# ---------- 5) Track existing binary-KAN structures ----------
+	had_bkm = hasattr(model, "_binary_kan_modules")
+	if had_bkm:
+		# we only need the keys; parameters are restored via load_state_dict
+		prev_bkm_keys = set(model._binary_kan_modules.keys())
+	else:
+		prev_bkm_keys = None
+
+	had_bkm_meta = hasattr(model, "_binary_kan_meta")
+	if had_bkm_meta:
+		prev_bkm_meta = copy.deepcopy(model._binary_kan_meta)
+	else:
+		prev_bkm_meta = None
 
 	try:
+		# everything inside the 'with' happens here
 		yield
 	finally:
+		# ---------- A) Remove any *new* binary KAN modules ----------
+		if hasattr(model, "_binary_kan_modules"):
+			if had_bkm:
+				# keep only pre-existing keys, drop new ones
+				cur_keys = set(model._binary_kan_modules.keys())
+				new_keys = cur_keys - prev_bkm_keys
+				for k in new_keys:
+					del model._binary_kan_modules[k]
+			else:
+				# there was no _binary_kan_modules before snapshot
+				delattr(model, "_binary_kan_modules")
+
+		# ---------- B) Restore / remove binary-KAN metadata ----------
+		if had_bkm_meta:
+			model._binary_kan_meta = prev_bkm_meta
+		else:
+			if hasattr(model, "_binary_kan_meta"):
+				delattr(model, "_binary_kan_meta")
+
+		# ---------- C) Restore weights and mode ----------
 		model.load_state_dict(state, strict=True)
 		model.train(mode)
 		model.save_act  = save_act0
 		model.auto_save = auto_save0
 
+		# ---------- D) Restore RNG states ----------
 		torch.random.set_rng_state(torch_state)
 		if cuda_state is not None:
 			torch.cuda.set_rng_state_all(cuda_state)
 		np.random.set_state(np_state)
 		random.setstate(py_state)
 
+	# ---------- E) Restore cached forward buffers ----------
 	model.cache_data = cache_data
 	model.acts = acts
 	model.acts_premult = acts_premult
@@ -86,7 +124,6 @@ def _model_snapshot(model):
 	model.acts_scale_spline = acts_scale_spline
 	model.subnode_actscale = subnode_actscale
 	model.edge_actscale = edge_actscale
-
 
 class SimplifyTimeout(Exception): pass
 
@@ -107,13 +144,12 @@ def time_limit(seconds: float):
 		signal.setitimer(signal.ITIMER_REAL, 0)
 		signal.signal(signal.SIGALRM, prev)
 
-
-
 class MultKAN(nn.Module):
-	def __init__(self, width=None, grid=3, k=3, mult_arity = 2, noise_scale=0.3, scale_base_mu=0.0, scale_base_sigma=1.0, base_fun='silu', affine_trainable=False, grid_eps=0.02, grid_range=[-1, 1], sp_trainable=True, sb_trainable=True, seed=1, save_act=True, sparse_init=False, auto_save=True, first_init=True, ckpt_path='./model', state_id=0, round=0, device='cpu', atom_names=None, spline_weight_init_scale=0.1, numeric_atom_configs=None):
+	def __init__(self, width=None, grid=3, k=3, mult_arity = 2, noise_scale=0.3, scale_base_mu=0.0, scale_base_sigma=1.0, base_fun='silu', affine_trainable=False, grid_eps=0.02, grid_range=[-1, 1], sp_trainable=True, sb_trainable=True, seed=1, save_act=True, sparse_init=False, auto_save=True, first_init=True, ckpt_path='./model', state_id=0, round=0, device='cpu', atom_names=None, numeric_atom_configs=None, chain_nodes=0):
 
 		super(MultKAN, self).__init__()
 
+		self.seed = seed
 		torch.manual_seed(seed)
 		np.random.seed(seed)
 		random.seed(seed)
@@ -122,6 +158,7 @@ class MultKAN(nn.Module):
 
 		self.act_fun = []
 		self.depth = len(width) - 1
+		self.chain_nodes = chain_nodes
 
 		# multiplicative strength per layer (start at 0 = no mult influence)
 		# self.mult_alpha = nn.ParameterList([
@@ -163,9 +200,11 @@ class MultKAN(nn.Module):
 		self.grid_range = grid_range
 
 		self.atom_names = atom_names
-		self.spline_weight_init_scale = spline_weight_init_scale
+		self.noise_scale = noise_scale
 		self.numeric_atom_configs = numeric_atom_configs
 			
+		self._binary_kan_modules = nn.ModuleDict()
+		self._binary_kan_meta = {}
 		
 		for l in range(self.depth):
 			# splines
@@ -179,6 +218,8 @@ class MultKAN(nn.Module):
 			else:
 				k_l = k
 					
+			self.scale_base_mu = scale_base_mu
+			self.scale_base_sigma = scale_base_sigma
 			if self.atom_names is None:
 				sp_batch = KANLayer(
 					input_dim=width_in[l],
@@ -186,8 +227,11 @@ class MultKAN(nn.Module):
 					grid_min=self.grid_range[0],
 					grid_max=self.grid_range[1],
 					num_grids=grid_l,
+					k=k_l, 
+					noise_scale=self.noise_scale, 
+					scale_base_mu=self.scale_base_mu, 
+					scale_base_sigma=self.scale_base_sigma, 
 					# use_base_update=False,
-					spline_weight_init_scale=self.spline_weight_init_scale,
 				)
 			else:
 				sp_batch = GatedSymbolicLayer(
@@ -195,6 +239,7 @@ class MultKAN(nn.Module):
 					output_dim=width_out[l+1],
 					atom_names=self.atom_names,
 					numeric_atom_configs=self.numeric_atom_configs,
+					base_fun=base_fun
 				)
 
 			# sp_batch = KANLayer(in_dim=width_in[l], out_dim=width_out[l+1], num=grid_l, k=k_l, noise_scale=noise_scale, scale_base_mu=scale_base_mu, scale_base_sigma=scale_base_sigma, scale_sp=1., base_fun=base_fun, grid_eps=grid_eps, grid_range=grid_range, sp_trainable=sp_trainable, sb_trainable=sb_trainable, sparse_init=sparse_init)
@@ -204,19 +249,6 @@ class MultKAN(nn.Module):
 		self.node_scale = []
 		self.subnode_bias = []
 		self.subnode_scale = []
-		
-		# globals()['self.node_bias_0'] = torch.nn.Parameter(torch.zeros(3,1)).requires_grad_(False)
-		# exec('self.node_bias_0' + " = torch.nn.Parameter(torch.zeros(3,1)).requires_grad_(False)")
-		
-		# for l in range(self.depth):
-		#     exec(f'self.node_bias_{l} = torch.nn.Parameter(torch.zeros(width_in[l+1])).requires_grad_(affine_trainable)')
-		#     exec(f'self.node_scale_{l} = torch.nn.Parameter(torch.ones(width_in[l+1])).requires_grad_(affine_trainable)')
-		#     exec(f'self.subnode_bias_{l} = torch.nn.Parameter(torch.zeros(width_out[l+1])).requires_grad_(affine_trainable)')
-		#     exec(f'self.subnode_scale_{l} = torch.nn.Parameter(torch.ones(width_out[l+1])).requires_grad_(affine_trainable)')
-		#     exec(f'self.node_bias.append(self.node_bias_{l})')
-		#     exec(f'self.node_scale.append(self.node_scale_{l})')
-		#     exec(f'self.subnode_bias.append(self.subnode_bias_{l})')
-		#     exec(f'self.subnode_scale.append(self.subnode_scale_{l})')
 
 		self.node_bias  = nn.ParameterList([
 			nn.Parameter(torch.zeros(self.width_in[l + 1]), requires_grad=affine_trainable)
@@ -478,6 +510,7 @@ class MultKAN(nn.Module):
 		model_new = MultKAN(width=self.width, 
 					 grid=new_grid, 
 					 k=self.k, 
+					 seed=self.seed+1,
 					 mult_arity=self.mult_arity, 
 					 base_fun=self.base_fun_name, 
 					 affine_trainable=self.affine_trainable, 
@@ -492,8 +525,9 @@ class MultKAN(nn.Module):
 					 round=self.round,
 					 device=self.device,
 					 atom_names=self.atom_names,
-					 spline_weight_init_scale=self.spline_weight_init_scale,
-					 numeric_atom_configs=self.numeric_atom_configs)
+					 noise_scale=self.noise_scale,
+					 numeric_atom_configs=self.numeric_atom_configs,
+					 chain_nodes=self.chain_nodes)
 			
 		model_new.initialize_from_another_model(self, self.cache_data)
 		model_new.cache_data = self.cache_data
@@ -546,8 +580,9 @@ class MultKAN(nn.Module):
 			round = model.round,
 			device = str(model.device),
 			atom_names = model.atom_names,
-			spline_weight_init_scale = model.spline_weight_init_scale,
+			noise_scale = model.noise_scale,
 			numeric_atom_configs = model.numeric_atom_configs,
+			chain_nodes = model.chain_nodes,
 		)
 
 		for i in range (model.depth):
@@ -568,6 +603,7 @@ class MultKAN(nn.Module):
 
 		model_load = MultKAN(
 			width=config['width'], grid=config['grid'], k=config['k'],
+			seed=config['seed'],
 			mult_arity=config['mult_arity'], base_fun=config['base_fun_name'],
 			affine_trainable=config['affine_trainable'], grid_eps=config['grid_eps'],
 			grid_range=config['grid_range'], sp_trainable=config['sp_trainable'],
@@ -575,8 +611,9 @@ class MultKAN(nn.Module):
 			auto_save=config['auto_save'], first_init=False,
 			ckpt_path=config['ckpt_path'], round=config['round']+1,
 			device=config['device'], atom_names=config['atom_names'], 
-			spline_weight_init_scale=config['spline_weight_init_scale'],
+			noise_scale=config['noise_scale'],
 			numeric_atom_configs=config['numeric_atom_configs'],
+			chain_nodes=config['chain_nodes'],
 		)
 		model_load.load_state_dict(state, strict=True)
 		model_load.cache_data = torch.load(f'{path}_cache_data')
@@ -742,39 +779,6 @@ class MultKAN(nn.Module):
 		)
 
 	def forward(self, x, singularity_avoiding=False, y_th=10.):
-		'''
-		forward pass
-		
-		Args:
-		-----
-			x : 2D torch.tensor
-				inputs
-			singularity_avoiding : bool
-				whether to avoid singularity for the symbolic branch
-			y_th : float
-				the threshold for singularity
-
-		Returns:
-		--------
-			None
-			
-		Example1
-		--------
-		>>> from kan import *
-		>>> model = KAN(width=[2,5,1], grid=5, k=3, seed=0)
-		>>> x = torch.rand(100,2)
-		>>> model(x).shape
-		
-		Example2
-		--------
-		>>> from kan import *
-		>>> model = KAN(width=[1,1], grid=5, k=3, seed=0)
-		>>> x = torch.tensor([[1],[-0.01]])
-		>>> model.fix_symbolic(0,0,0,'log',fit_params_bool=False)
-		>>> print(model(x))
-		>>> print(model(x, singularity_avoiding=True))
-		>>> print(model(x, singularity_avoiding=True, y_th=1.))
-		'''
 		x = x[:,self.input_id.long()]
 		assert x.shape[1] == self.width_in[0]
 		
@@ -800,7 +804,53 @@ class MultKAN(nn.Module):
 			
 			x_numerical, preacts, postacts_numerical, postspline = self.act_fun[l](x)
 			#print(preacts, postacts_numerical, postspline)
-			
+
+			# ===== MultKAN / DivKAN contribution on this layer =====
+			x_multkan = 0.0  # sentinel: stays float if no binary KANs on this layer
+			if hasattr(self, "_binary_kan_meta") and hasattr(self, "_binary_kan_modules"):
+				for (l_edge, i_edge, j_edge), meta in self._binary_kan_meta.items():
+					if l_edge != l:
+						continue  # this binary KAN belongs to another layer
+
+					edge_key = meta["key"]
+					if edge_key not in self._binary_kan_modules:
+						continue
+
+					child_list = self._binary_kan_modules[edge_key]  # ModuleList of sub-KANs
+
+					# input to the 1D KANs for this edge: spline preactivation
+					# preacts: [B, out_dim, in_dim] -> scalar [B, 1]
+					z = preacts[:, j_edge, i_edge].unsqueeze(-1)  # [B, 1]
+
+					vals = [child(z).squeeze(-1) for child in child_list]  # each [B]
+					if len(vals) == 0:
+						continue
+
+					if isinstance(x_multkan, float):
+						x_multkan = torch.zeros_like(x_numerical)
+
+					op_bin = meta["op"]
+					eps = 1e-6
+
+					if op_bin == "div":
+						# first child is numerator, rest multiply into denominator
+						num = vals[0]
+						if len(vals) == 1:
+							den = torch.ones_like(num)
+						else:
+							den = vals[1]
+							for v in vals[2:]:
+								den = den * v
+						edge_val = num / (den.abs() + eps)
+					else:  # "mul" or anything else → product
+						edge_val = vals[0]
+						for v in vals[1:]:
+							edge_val = edge_val * v
+
+					# add this edge contribution to the j_edge output unit
+					x_multkan[:, j_edge] += edge_val
+
+			# ===== normal symbolic part =====
 			if self.symbolic_fun[l].mask.abs().sum().item() > 0:
 				x_symbolic, postacts_symbolic = self.symbolic_fun[l](
 					x, singularity_avoiding=singularity_avoiding, y_th=y_th
@@ -809,7 +859,10 @@ class MultKAN(nn.Module):
 				x_symbolic = 0.
 				postacts_symbolic = 0.
 
+			# combine numeric + symbolic + binary-KAN contributions
 			x = x_numerical + x_symbolic
+			if not isinstance(x_multkan, float):
+				x = x + x_multkan
 			
 			if self.save_act:
 				# save subnode_scale
@@ -822,14 +875,14 @@ class MultKAN(nn.Module):
 				postacts = postacts_numerical + postacts_symbolic
 
 				# self.neurons_scale.append(torch.mean(torch.abs(x), dim=0))
-				#grid_reshape = self.act_fun[l].grid.reshape(self.width_out[l + 1], self.width_in[l], -1)
 				input_range = torch.std(preacts, dim=0) + 0.1
-				output_range_spline = torch.std(postacts_numerical, dim=0) # for training, only penalize the spline part
-				output_range = torch.std(postacts, dim=0) # for visualization, include the contribution from both spline + symbolic
+				output_range_spline = torch.std(postacts_numerical, dim=0)  # training: spline only
+				output_range = torch.std(postacts, dim=0)  # viz: spline + symbolic
+
 				# save edge_scale
 				self.edge_actscale.append(output_range)
 				
-				self.acts_scale.append((output_range / input_range)) # <-- no .detach()
+				self.acts_scale.append((output_range / input_range))  # <-- no .detach()
 				self.acts_scale_spline.append(output_range_spline / input_range)
 				self.spline_preacts.append(preacts.detach())
 				self.spline_postacts.append(postacts.detach())
@@ -885,7 +938,6 @@ class MultKAN(nn.Module):
 			
 			self.acts.append(x.detach())
 			
-		
 		return x
 
 	def set_mode(self, l, i, j, mode, mask_n=None):
@@ -977,10 +1029,26 @@ class MultKAN(nn.Module):
 		'''
 		unfix the (l,i,j) activation function.
 		'''
+		# restore numeric mode (this will re-enable the numeric spline edge)
 		self.set_mode(l, i, j, mode="n")
+
+		# clear symbolic name
 		self.symbolic_fun[l].funs_name[j][i] = "0"
+
+		# --- NEW: if this edge had a binary KAN attached, forget its metadata ---
+		if hasattr(self, "_binary_kan_meta"):
+			key = (l, i, j)
+			if key in self._binary_kan_meta:
+				self._binary_kan_meta.pop(key)
+
+		# NOTE: I’m *not* deleting self._binary_kan_modules here because:
+		# - they may be shared across multiple edges, or
+		# - you might want to re-use them later.
+		# If you ever want full cleanup, you can track per-edge indices instead.
+
 		if log_history:
 			self.log_history('unfix_symbolic')
+
 
 	def unfix_symbolic_all(self, log_history=True):
 		'''
@@ -1554,7 +1622,12 @@ class MultKAN(nn.Module):
 		grid_update_freq = max(1, int(stop_grid_update_step / grid_update_num)) if update_grid else steps+1
 
 		# ---- optimizer
-		params = self.get_params()
+		params = list(self.get_params())
+		# include parameters of grafted binary KANs (MultKAN / DivKAN children)
+		if hasattr(self, "_binary_kan_modules"):
+			for child_list in self._binary_kan_modules.values():  # each is a ModuleList
+				params.extend(child_list.parameters())
+
 		if opt == "Adam":
 			optimizer = torch.optim.Adam(params, lr=lr)
 		elif opt == "LBFGS":
@@ -1847,6 +1920,7 @@ class MultKAN(nn.Module):
 			copy.deepcopy(self.width),
 			grid=self.grid,
 			k=self.k,
+			seed=self.seed,
 			base_fun=self.base_fun_name,
 			mult_arity=self.mult_arity,
 			ckpt_path=self.ckpt_path,
@@ -1856,8 +1930,9 @@ class MultKAN(nn.Module):
 			round=self.round,
 			device=self.device,
 			atom_names=self.atom_names,
-			spline_weight_init_scale=self.spline_weight_init_scale,
+			noise_scale=self.noise_scale,
 			numeric_atom_configs=self.numeric_atom_configs,
+			chain_nodes=self.chain_nodes,
 		).to(self.device)
 
 		model2.load_state_dict(self.state_dict())
@@ -1985,58 +2060,25 @@ class MultKAN(nn.Module):
 		return model
 	
 	def prune_input(self, threshold=1e-2, active_inputs=None, log_history=True):
-		'''
-		prune inputs
-
-		Args:
-		-----
-			threshold : float
-				if the attribution score of the input feature is below threshold, it is considered irrelevant.
-			active_inputs : None or list
-				if a list is passed, the manual mode will disregard attribution score and prune as instructed.
-			
-		Returns:
-		--------
-			pruned network : MultKAN
-
-		Example1
-		--------
-		>>> # automatic
-		>>> from kan import *
-		>>> model = KAN(width=[3,5,1], grid=5, k=3, noise_scale=0.3, seed=2)
-		>>> f = lambda x: 1 * x[:,[0]]**2 + 0.3 * x[:,[1]]**2 + 0.0 * x[:,[2]]**2
-		>>> dataset = create_dataset(f, n_var=3)
-		>>> model.fit(dataset, opt='LBFGS', steps=20, lamb=0.001);
-		>>> model.plot()
-		>>> model = model.prune_input()
-		>>> model.plot()
-		
-		Example2
-		--------
-		>>> # automatic
-		>>> from kan import *
-		>>> model = KAN(width=[3,5,1], grid=5, k=3, noise_scale=0.3, seed=2)
-		>>> f = lambda x: 1 * x[:,[0]]**2 + 0.3 * x[:,[1]]**2 + 0.0 * x[:,[2]]**2
-		>>> dataset = create_dataset(f, n_var=3)
-		>>> model.fit(dataset, opt='LBFGS', steps=20, lamb=0.001);
-		>>> model.plot()
-		>>> model = model.prune_input(active_inputs=[0,1])
-		>>> model.plot()
-		'''
+		"""
+		Prune input features based on attribution or a manual list.
+		Also updates any MultKAN/DivKAN child KANs on layer 0.
+		"""
 		if active_inputs is None:
 			self.attribute()
 			input_score = self.node_scores[0]
 			input_mask = input_score > threshold
 			print('keep:', input_mask.tolist())
-			input_id = torch.where(input_mask==True)[0]
-			
+			input_id = torch.where(input_mask == True)[0]
 		else:
 			input_id = torch.tensor(active_inputs, dtype=torch.long).to(self.device)
-		
+
+		# --- build new model with same hyperparams ---
 		model2 = MultKAN(
 			copy.deepcopy(self.width),
 			grid=self.grid,
 			k=self.k,
+			seed=self.seed,
 			base_fun=self.base_fun_name,
 			mult_arity=self.mult_arity,
 			ckpt_path=self.ckpt_path,
@@ -2045,55 +2087,147 @@ class MultKAN(nn.Module):
 			state_id=self.state_id,
 			round=self.round,
 			atom_names=self.atom_names,
-			spline_weight_init_scale=self.spline_weight_init_scale,
+			noise_scale=self.noise_scale,
 			numeric_atom_configs=self.numeric_atom_configs,
+			chain_nodes=self.chain_nodes,
 		).to(self.device)
+
+		# copy all parameters, including child KANs (if any)
 		model2.load_state_dict(self.state_dict())
 
-		model2.act_fun[0] = model2.act_fun[0].get_subset(input_id, torch.arange(self.width_out[1]))
-		model2.symbolic_fun[0] = self.symbolic_fun[0].get_subset(input_id, torch.arange(self.width_out[1]))
+		# --- shrink first layer numeric and symbolic front ---
+		model2.act_fun[0] = model2.act_fun[0].get_subset(
+			input_id,
+			torch.arange(self.width_out[1])
+		)
+		model2.symbolic_fun[0] = self.symbolic_fun[0].get_subset(
+			input_id,
+			torch.arange(self.width_out[1])
+		)
 
+		# --- update binary KAN metadata for layer 0 ---
+		# mapping from old input index -> new input index
+		input_id_cpu = input_id.detach().cpu().tolist()
+		old2new = {old_i: new_i for new_i, old_i in enumerate(input_id_cpu)}
+
+		if hasattr(model2, "_binary_kan_meta") and hasattr(model2, "_binary_kan_modules"):
+			new_meta = {}
+			new_modules = nn.ModuleDict()
+
+			# first, carry over all existing modules; we'll prune/rename as needed
+			for edge_key, modlist in model2._binary_kan_modules.items():
+				new_modules[edge_key] = modlist
+
+			# now rebuild meta, remapping layer-0 input indices
+			for (L, i_old, j), meta in model2._binary_kan_meta.items():
+				edge_key_old = meta.get("key", None)
+				if edge_key_old is None:
+					continue
+
+				if L == 0:
+					# input layer: check if input feature survived
+					if i_old not in old2new:
+						# this input feature was pruned -> drop its child KANs
+						if edge_key_old in new_modules:
+							del new_modules[edge_key_old]
+						continue
+
+					i_new = old2new[i_old]
+					new_edge_key = f"l{L}_i{i_new}_j{j}"
+
+					# move ModuleList under new key if necessary
+					if edge_key_old in new_modules and new_edge_key != edge_key_old:
+						new_modules[new_edge_key] = new_modules[edge_key_old]
+						del new_modules[edge_key_old]
+
+					new_meta[(L, i_new, j)] = {
+						"op": meta.get("op", "mul"),
+						"key": new_edge_key,
+					}
+				else:
+					# layers > 0: unaffected by input pruning
+					new_meta[(L, i_old, j)] = meta
+					# keep modules as-is
+					# (edge_key_old is already in new_modules)
+
+			model2._binary_kan_meta = new_meta
+			model2._binary_kan_modules = new_modules
+
+		# --- fix bookkeeping ---
 		model2.cache_data = self.cache_data
 		model2.acts = None
 
 		model2.width[0] = [len(input_id), 0]
 		model2.input_id = input_id
-		
+
 		if log_history:
 			self.log_history('prune_input')
 			model2.state_id += 1
-		
+
 		return model2
+
 
 	def remove_edge(self, l, i, j, log_history=True):
 		'''
 		remove activtion phi(l,i,j) (set its mask to zero)
 		'''
 		with torch.no_grad():
-			self.act_fun[l].mask[i][j] = 0.
+			# numeric spline / gated numeric edge
+			if hasattr(self.act_fun[l], "mask"):
+				self.act_fun[l].mask[i, j] = 0.
+
+			# symbolic branch
+			if hasattr(self.symbolic_fun[l], "mask"):
+				# mask shape is [out_dim, in_dim]
+				self.symbolic_fun[l].mask[j, i] = 0.
+			if hasattr(self.symbolic_fun[l], "funs_name"):
+				self.symbolic_fun[l].funs_name[j][i] = "0"
+
+			# MultKAN / DivKAN children
+			self._delete_binary_kan_edge(l, i, j)
 		if log_history:
 			self.log_history('remove_edge')
 
-	def remove_node(self, l ,i, mode='all', log_history=True):
-		'''
-		remove neuron (l,i) (set the masks of all incoming and outgoing activation functions to zero)
-		'''
+	def remove_node(self, l, i, mode='all', log_history=True):
+		"""
+		Remove neuron (l,i) by zeroing masks of incoming/outgoing edges
+		and cleaning up any attached MultKAN/DivKAN submodels.
+		"""
+		# helper to remove all binary KAN edges matching a selector
+		def _drop_edges_for_node(layer_idx, cond_fn):
+			if not hasattr(self, "_binary_kan_meta"):
+				return
+			# iterate over a copy because we'll mutate the dict
+			for (L, ii, jj) in list(self._binary_kan_meta.keys()):
+				if L != layer_idx:
+					continue
+				if cond_fn(ii, jj):
+					self._delete_binary_kan_edge(L, ii, jj)
+
 		if mode == 'down':
+			# remove all edges that go into node (l, i) from layer l-1
 			with torch.no_grad():
 				self.act_fun[l - 1].mask[:, i] = 0.
 				self.symbolic_fun[l - 1].mask[i, :].zero_()
+			# any edge (l-1, in_idx -> out_idx = i)
+			_drop_edges_for_node(l - 1, lambda ii, jj: jj == i)
 
 		elif mode == 'up':
+			# remove all edges that go out of node (l, i) to layer l+1
 			with torch.no_grad():
 				self.act_fun[l].mask[i, :] = 0.
 				self.symbolic_fun[l].mask[:, i].zero_()
-			
+			# any edge (l, in_idx = i -> out_idx)
+			_drop_edges_for_node(l, lambda ii, jj: ii == i)
+
 		else:
-			self.remove_node(l, i, mode='up')
-			self.remove_node(l, i, mode='down')
-			
+			# both directions
+			self.remove_node(l, i, mode='up',   log_history=False)
+			self.remove_node(l, i, mode='down', log_history=False)
+
 		if log_history:
 			self.log_history('remove_node')
+
 			
 			
 	def attribute(self, l=None, i=None, out_score=None, plot=True):
@@ -2418,6 +2552,10 @@ class MultKAN(nn.Module):
 			lib = list(SYMBOLIC_LIB.keys())
 		# we will ensure '0' is present in lib_edge later per edge
 
+		# Child KANs must NOT see MultKAN/DivKAN
+		if not self.chain_nodes:
+			lib = [f for f in lib if f not in ("MultKAN", "DivKAN")]
+
 		# Which layers to consider
 		Ls = range(self.depth) if layers is None else layers
 
@@ -2449,7 +2587,7 @@ class MultKAN(nn.Module):
 				if torch.isfinite(val):
 					j, i = torch.nonzero(cand == val, as_tuple=False)[0]  # first argmax
 					s = float(val.item())
-					if (best is None) or (s > best[0]):
+					if (best is None) or (s < best[0]):
 						best = (s, l, int(i.item()), int(j.item()))
 
 			if best is None:
@@ -2526,9 +2664,14 @@ class MultKAN(nn.Module):
 
 			# make sure '0' exists so edges can be "removed" symbolically
 			if '0' not in lib_edge:
-				lib_edge = list(lib_edge) + ['0']
+				lib_edge.append('0')
 			if '1' not in lib_edge:
-				lib_edge = list(lib_edge) + ['1']
+				lib_edge.append('1')
+			if self.chain_nodes > 1:
+				if 'MultKAN' not in lib_edge:
+					lib_edge.append('MultKAN')
+				if 'DivKAN' not in lib_edge:
+					lib_edge.append('DivKAN')
 
 			# --- search over this edge-specific lib ---
 			if len(lib_edge) == 1:
@@ -2537,12 +2680,25 @@ class MultKAN(nn.Module):
 			else:
 				for fun_name in lib_edge:
 					with _model_snapshot(self):  # snapshot-and-restore around each try
-						self.fix_symbolic(
-							l, i, j, fun_name,
-							fit_params_bool=False,
-							verbose=(verbose >= 2),
-							log_history=False
-						)
+						if 'KAN' in fun_name:
+							# x = self.spline_preacts[l][:, j, i]   # what the edge actually uses as input
+							# this will *graft* two child KANs on this edge inside `self`
+							self._init_binary_kan_edge(
+								l=l,
+								i=i,
+								j=j,
+								hidden_nodes=self.chain_nodes,
+								op="mul" if fun_name == "MultKAN" else "div",
+								verbose=(verbose >= 2),
+							)
+							self.fit(data, opt=optimizer, lr=lr, steps=steps, lamb=lamb)
+						else:
+							self.fix_symbolic(
+								l, i, j, fun_name,
+								fit_params_bool=False,
+								verbose=(verbose >= 2),
+								log_history=False
+							)
 						results = self.fit(data, opt=optimizer, lr=lr, steps=steps, lamb=lamb)
 						if results['train_loss'][-1] < best_loss:
 							best_loss = results['train_loss'][-1]
@@ -2552,12 +2708,43 @@ class MultKAN(nn.Module):
 			if not best_function:
 				best_function = '0'
 
-			self.fix_symbolic(
-				l, i, j, best_function,
-				fit_params_bool=False,
-				verbose=(verbose >= 2),
-				log_history=False
-			)
+			if 'KAN' in best_function:
+				# graft child KANs for this edge *for real* (outside snapshot)
+				self._init_binary_kan_edge(
+					l=l,
+					i=i,
+					j=j,
+					hidden_nodes=self.chain_nodes,
+					op="mul" if best_function == "MultKAN" else "div",
+					verbose=(verbose >= 2),
+				)
+				self.fit(data, opt=optimizer, lr=lr, steps=steps, lamb=lamb)
+				meta = self._binary_kan_meta[(l, i, j)]
+				edge_key = meta["key"]
+				children = self._binary_kan_modules[edge_key]  # ModuleList
+				picks.append({
+					f'sub_{l}_{i}_{j}': sub_module.auto_symbolic_robust_greedy(
+						data,
+						optimizer=optimizer,
+						lib=lib,
+						min_edge_score=min_edge_score,
+						layers=layers,
+						weight_simple=weight_simple,
+						verbose=verbose,
+						lr=lr,
+						steps=steps,
+						lamb=lamb,
+						top_k_gates=top_k_gates,
+					)
+					for sub_module in children
+				})
+			else:
+				self.fix_symbolic(
+					l, i, j, best_function,
+					fit_params_bool=False,
+					verbose=(verbose >= 2),
+					log_history=False
+				)
 
 			picks.append({
 				'l': l,
@@ -2575,6 +2762,108 @@ class MultKAN(nn.Module):
 		# housekeeping
 		self.log_history('auto_symbolic_robust_greedy')
 		return picks
+
+	def _init_binary_kan_edge(
+		self,
+		l: int,
+		i: int,
+		j: int,
+		op: str,                 # "mul" or "div"
+		hidden_nodes: int = 1,
+		verbose: bool = False,
+	):
+		"""
+		Create & graft two 1D KANs on edge (l, i -> j), combined by
+		multiplication (op='mul') or division (op='div').
+
+		After this call:
+		  - two child KANs are registered as submodules of `self`
+		  - metadata is stored so forward() can use them
+		  - the numeric spline for this edge is disabled
+		  - the symbolic name at this edge is set to 'MultKAN' or 'DivKAN'
+		"""
+		assert op in ("mul", "div")
+
+		# unique key for this edge
+		edge_key = f"l{l}_i{i}_j{j}"
+
+		# --- instantiate child 1D KANs for THIS edge (if not already) ---
+		if edge_key not in self._binary_kan_modules:
+			SubKAN = self.__class__  # same class as the parent
+
+			child_list = []
+			for h in range(hidden_nodes):
+				sub_module = SubKAN(
+					width=[1, 1],
+					grid=self.grid,
+					k=self.k,
+					# mult_arity=2,
+					noise_scale=self.noise_scale,
+					scale_base_mu=self.scale_base_mu,
+					scale_base_sigma=self.scale_base_sigma,
+					base_fun=self.base_fun_name,
+					affine_trainable=self.affine_trainable,
+					grid_eps=self.grid_eps,
+					grid_range=self.grid_range,
+					sp_trainable=self.sp_trainable,
+					sb_trainable=self.sb_trainable,
+					seed=self.seed + 1 + h,
+					save_act=True,
+					sparse_init=False,
+					auto_save=False,
+					first_init=True,
+					ckpt_path=self.ckpt_path,
+					state_id=0,
+					round=0,
+					device=self.device,
+					atom_names=self.atom_names,
+					numeric_atom_configs=self.numeric_atom_configs,
+					chain_nodes=0, # children don't spawn more MultKANs
+				)
+				# sub_module.forward(self.cache_data)
+				child_list.append(sub_module)
+
+			self._binary_kan_modules[edge_key] = nn.ModuleList(child_list)
+
+		# store operator + key in meta
+		self._binary_kan_meta[(l, i, j)] = {
+			"op": op,
+			"key": edge_key,
+		}
+		
+		if verbose:
+			print(f"[MultKAN] grafted binary {op} KAN on edge (l={l}, i={i}, j={j})")
+
+		# --- disable original numeric spline for this edge --------------
+		# act_fun uses mask (in_dim, out_dim)^T in your code above
+		self.act_fun[l].mask[i, j] = 0  # turn off numeric edge
+
+		# and mark symbolic edge with a special name so that forward()
+		# knows to route through the binary KAN instead.
+		fun_name = "MultKAN" if op == "mul" else "DivKAN"
+		self.symbolic_fun[l].funs_name[j][i] = fun_name
+		self.symbolic_fun[l].mask[j, i] = 1  # enable symbolic edge
+
+	def _delete_binary_kan_edge(self, l: int, i: int, j: int):
+		"""
+		Remove any MultKAN/DivKAN sub-models and metadata attached to edge (l, i -> j).
+		Safe to call even if nothing is attached.
+		"""
+		if not hasattr(self, "_binary_kan_meta"):
+			return
+
+		key = (l, i, j)
+		meta = self._binary_kan_meta.pop(key, None)
+		if meta is None:
+			return
+
+		edge_key = meta.get("key", None)
+		if edge_key is None:
+			return
+
+		if hasattr(self, "_binary_kan_modules") and edge_key in self._binary_kan_modules:
+			# drop the entire ModuleList of children
+			del self._binary_kan_modules[edge_key]
 
 
 	def symbolic_formula(self, var=None, normalizer=None, output_normalizer=None, simplify=False, compact=True):
@@ -2696,23 +2985,77 @@ class MultKAN(nn.Module):
 				else:
 					# ---------- CASE 2: use legacy Symbolic_KANLayer ----------
 					for i in range(self.width_in[l]):
-						a, b, c, d = [_sf(v) for v in self.symbolic_fun[l].affine[j, i]]
-						sympy_fun = self.symbolic_fun[l].funs_sympy[j][i]
+						fun_name_ij = None
+						if hasattr(self.symbolic_fun[l], "funs_name"):
+							fun_name_ij = self.symbolic_fun[l].funs_name[j][i]
 
-						term = d
-						if abs(float(c)) > 1e-12:
-							arg = a * x[i] + b
-							try:
-								val = sympy_fun(arg)
-							except Exception as e:
-								print('Error in symbolic edge (l,i,j):', l, i, j, e)
-								continue
-							term = term + c * val
+						# --------- SPECIAL CASE: MultKAN / DivKAN edges ----------
+						if fun_name_ij in ("MultKAN", "DivKAN"):
+							z = x[i]  # or a fresh sympy symbol tied to this edge
 
+							op_bin = "mul"
+							edge_key = None
+							if hasattr(self, "_binary_kan_meta"):
+								meta = self._binary_kan_meta.get((l, i, j))
+								if meta is not None:
+									op_bin = meta.get("op", "mul")
+									edge_key = meta.get("key", None)
+
+							sub_exprs = []
+							if edge_key is not None and hasattr(self, "_binary_kan_modules"):
+								if edge_key in self._binary_kan_modules:
+									children = self._binary_kan_modules[edge_key]
+									for sub_model in children:
+										sub_formula_list, _x0 = sub_model.symbolic_formula(
+											var=[z],
+											normalizer=None,
+											output_normalizer=None,
+											simplify=False,
+											compact=False,
+										)
+										if len(sub_formula_list) > 0:
+											sub_exprs.append(sub_formula_list[0])
+
+							if len(sub_exprs) == 0:
+								term = SymFloat(0.0)
+							else:
+								if op_bin == "div":
+									num = sub_exprs[0]
+									if len(sub_exprs) == 1:
+										den = SymFloat(1.0)
+									else:
+										den = sub_exprs[1]
+										for ex_k in sub_exprs[2:]:
+											den = den * ex_k
+									term = num / den
+								else:
+									term = sub_exprs[0]
+									for ex_k in sub_exprs[1:]:
+										term = term * ex_k
+
+						else:
+							# --------- NORMAL symbolic edge logic ----------
+							a, b, c, d = [_sf(v) for v in self.symbolic_fun[l].affine[j, i]]
+							sympy_fun = self.symbolic_fun[l].funs_sympy[j][i]
+
+							term = d
+							if abs(float(c)) > 1e-12:
+								arg = a * x[i] + b
+								try:
+									val = sympy_fun(arg)
+								except Exception as e:
+									print('Error in symbolic edge (l,i,j):', l, i, j, e)
+									continue
+								term = term + c * val
+						# print(0, term)
+						# print(1, a,b,c,d, fun_name_ij)
+
+						# aggregate into y_j according to the node op
 						if op == "mul":
 							yj = yj * term
 						else:
 							yj = yj + term
+
 
 				# subnode affine
 				yj = _sf(self.subnode_scale[l][j]) * yj + _sf(self.subnode_bias[l][j])
