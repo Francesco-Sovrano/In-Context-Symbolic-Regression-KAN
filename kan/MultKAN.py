@@ -2794,7 +2794,7 @@ class MultKAN(nn.Module):
 			child_list = []
 			for h in range(hidden_nodes):
 				sub_module = SubKAN(
-					width=[1, 1],
+					width=[1, 1, 1],
 					grid=self.grid,
 					k=self.k,
 					# mult_arity=2,
