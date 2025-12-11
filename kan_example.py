@@ -1,4 +1,8 @@
-from kan import *
+import inspect
+import kan
+from kan.MultKAN import KAN, GatedSymbolicLayer
+from kan import create_dataset
+
 import torch
 import argparse
 
@@ -87,27 +91,56 @@ f_range = [-1,1]
 dataset = create_dataset(f, ranges=f_range, n_var=2, train_num=2000, test_num=1000)
 print(dataset['train_input'].shape, dataset['train_label'].shape)
 
-lib = ['0', 'x','x^2','x^3','x^4','exp','log','sqrt','tanh','sin','abs']
+lib = ['0', '1', 'x', 'x^2', 'exp', 'log', 'sqrt', 'tanh', 'sin', 'abs']
 
 # plot KAN at initialization
 model = KAN(
-	width=[2, 50, 1], 
-	grid=50, 
+	width=[2, 5, 1], 
+	grid=20, 
 	grid_range=f_range,
 	seed=0,
 	# atom_names=lib,
-	# numeric_atom_configs={
-	# 	"stepbf": {"num_grids": 20, "steepness": 10.},
-	# 	"rbf": {"num_grids": 50},
-	# },
+	numeric_atom_configs={
+		"step_bf": {"num_grids": 20, "steepness": 10.},
+		# "radial_bf": {"num_grids": 50},
+		"rational_bf": {"num_bases": 20, "degree_numerator": 3, "degree_denominator":2},
+	},
+	chain_nodes=2,
+	chain_types=['multiplication','division'],
 )
 
-model.fit(dataset, opt="Adam", lr=1e-2, steps=1000, lamb=1e-3)
-for _ in range(5):
-	model = model.prune(node_th=0.1, edge_th=0)
-	model.fit(dataset, opt="Adam", lr=1e-2, steps=1000, lamb=1e-3)
-	# check_gates(model)
+# print("kan imported from:", kan.__file__)
+# print("MultKAN class:", MultKAN)
+
+# print("Does the class have 'n_edge'? ->", 'n_edge' in dir(MultKAN))
+
+# # If this is True, you should see `<property object ...>`
+# print("MultKAN.n_edge:", getattr(MultKAN, "n_edge", None))
+
+
+training_options = dict(
+	optimizer="Adam", 
+	lr=1e-2, 
+	steps=500, 
+	lamb=1e-2, # lamb_l1 > 0 → pushes spline outputs/attributions toward sparse/low magnitude
+	# lamb_coefdiff=10.0, # lamb_coefdiff > 0 → enforces smooth, near-linear splines. A smooth, small-magnitude 1D spline naturally gravitates toward “constant” or “linear”
+	gating_entropy=1e-3, 
+	# gating_l1=1e-3, 
+	# mult_node_weight_decay=1e-2
+	reg_metric='edge_backward', # or 'edge_forward_spline_u', 'edge_backward', 'node_backward'; avoid 'edge_forward_spline_n' since it's not meant for GatedSymbolicLayer
+)
+
+model.fit(dataset, **training_options)
+for i in range(3):
+	model = model.prune(node_th=0.1, edge_th=0, gate_top_k=max(3, 6-i))
+	model.fit(dataset, **training_options)
+	check_gates(model)
 	print(model.get_symbolic_choice_per_edge())
+
+# training_options['lamb'] = 0
+model.fit(dataset, **training_options)
+check_gates(model)
+print(model.get_symbolic_choice_per_edge())
 
 mode = "auto" # "manual"
 if mode == "manual":
@@ -117,22 +150,30 @@ if mode == "manual":
 	model.fix_symbolic(1,0,0,'exp');
 elif mode == "auto":
 	# model.auto_symbolic(lib=lib, weight_simple=0)
-	summary = model.auto_symbolic_robust_greedy(
+	symbolic_training_options = dict(training_options)
+	# symbolic_training_options['optimizer'] = 'LBFGS'
+	symbolic_training_options['steps'] = 100
+	symbolic_training_options['lamb'] = 0
+	summary = model.greedy_symbolic_regression(
 		dataset,       # evaluation set
 		lib=lib,
-		min_edge_score=0.1,
+		# min_edge_score=0.1,
 		# weight_simple=0,
 		# verbose=1,
-		lr=1e-2,
-		steps=100,
-		# lamb=1e-2,
+		**symbolic_training_options,
 		# node_th=0.1, edge_th=0.1,
-		top_k_gates=3
+		top_k_gates=3,
 	)
-	print('auto_symbolic_robust_greedy:', summary)
+	print('greedy_symbolic_regression:', summary)
 
-model.fit(dataset, opt="Adam", lr=1e-3, steps=1000)
-# model.fit(dataset, opt="LBFGS", lr=1e-1, steps=500, gating_entropy=1e-1)
+training_options['lamb'] = 0
+model.fit(dataset, **training_options)
+# for _ in range(2):
+# 	model = model.prune(node_th=0.1, edge_th=0)
+# 	model.fit(dataset, **training_options)
+# 	# check_gates(model)
+# 	print(model.get_symbolic_choice_per_edge())
+# model.fit(dataset, optimizer="LBFGS", lr=1e-1, steps=500, gating_entropy=1e-1)
 # print(model.get_symbolic_choice_per_edge())
 # check_gates(model)
 

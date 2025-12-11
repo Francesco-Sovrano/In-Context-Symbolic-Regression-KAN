@@ -165,7 +165,10 @@ def _safe_arctanh(x, eps=EPS):
 
 # ---- NaN-proof library -----------------------------------------------------
 SYMBOLIC_LIB = {
-	'x':           (lambda x: x,           lambda x: x,                 1, None),
+	'0':           (lambda x: x*0, lambda x: x*0,       0, None),
+	'1':           (lambda x: x*0+1, lambda x: x*0+1,       0, None),
+	'x':           (lambda x: x,           lambda x: x,                 0, None),
+	
 	'x^2':         (lambda x: x**2,        lambda x: x**2,              2, None),
 	'x^3':         (lambda x: x**3,        lambda x: x**3,              3, None),
 	'x^4':         (lambda x: x**4,        lambda x: x**4,              4, None),
@@ -199,9 +202,6 @@ SYMBOLIC_LIB = {
 	'arccos':      (lambda x: _safe_arccos(x),     lambda x: sympy.acos(x),     4, f_arccos),
 	'arctan':      (lambda x: torch.arctan(x),     lambda x: sympy.atan(x),     4, None),
 	'arctanh':     (lambda x: _safe_arctanh(x),    lambda x: sympy.atanh(x),    4, f_arctanh),
-
-	'0':           (lambda x: x*0, lambda x: x*0,       0, None),
-	'1':           (lambda x: x*0+1, lambda x: x*0+1,       0, None),
 
 	'gaussian':    (lambda x: _safe_exp(-x**2),    lambda x: sympy.exp(-x**2), 3, lambda x, y_th: f_exp(-x**2, y_th)),
 	# 'cosh':      (lambda x: torch.cosh(x), lambda x: sympy.cosh(x), 5),
@@ -464,14 +464,14 @@ def fit_params(
 		b = torch.nn.Parameter(torch.tensor(b0, device=device, dtype=dtype))
 
 		if use_lbfgs:
-			opt = torch.optim.LBFGS([a, b], lr=lr, max_iter=steps, line_search_fn='strong_wolfe')
+			optimizer = torch.optim.LBFGS([a, b], lr=lr, max_iter=steps, line_search_fn='strong_wolfe')
 			def closure():
-				opt.zero_grad(set_to_none=True)
+				optimizer.zero_grad(set_to_none=True)
 				loss, _, _, _ = _loss_for_fun(fun_callable, a, b, need_pred=False)
 				loss.backward()
 				return loss
 			try:
-				opt.step(closure)
+				optimizer.step(closure)
 			except RuntimeError:
 				# fall back to Adam a little if LS fails
 				opt2 = torch.optim.Adam([a, b], lr=min(lr, 0.1))
@@ -487,12 +487,12 @@ def fit_params(
 					else:
 						stall = 0; prev = cur
 		else:
-			opt = torch.optim.Adam([a, b], lr=lr)
+			optimizer = torch.optim.Adam([a, b], lr=lr)
 			for _ in range(steps):
-				opt.zero_grad(set_to_none=True)
+				optimizer.zero_grad(set_to_none=True)
 				loss, _, _, _ = _loss_for_fun(fun_callable, a, b, need_pred=False)
 				loss.backward()
-				opt.step()
+				optimizer.step()
 
 		with torch.no_grad():
 			final_loss, y_hat, c, d = _loss_for_fun(fun_callable, a, b, need_pred=True)
@@ -651,16 +651,16 @@ def fit_params(
 #         d = torch.nn.Parameter(torch.tensor(d0, device=device, dtype=dtype))
 
 #         if use_lbfgs:
-#             opt = torch.optim.LBFGS([a, b, c, d], lr=lr, max_iter=steps, line_search_fn='strong_wolfe')
+#             optimizer = torch.optim.LBFGS([a, b, c, d], lr=lr, max_iter=steps, line_search_fn='strong_wolfe')
 
 #             def closure():
-#                 opt.zero_grad(set_to_none=True)
+#                 optimizer.zero_grad(set_to_none=True)
 #                 loss = _loss(a, b, c, d, need_pred=False)
 #                 loss.backward()
 #                 return loss
 
 #             try:
-#                 opt.step(closure)
+#                 optimizer.step(closure)
 #             except RuntimeError:
 #                 # rare LBFGS line-search failures -> fallback to Adam a few steps
 #                 opt2 = torch.optim.Adam([a, b, c, d], lr=min(lr, 0.1))

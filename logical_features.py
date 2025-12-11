@@ -199,15 +199,16 @@ symbolic_formula = None
 while not symbolic_formula or bad_mape(mape) or mape >= MAPE_THRESHOLD:
 	# model
 	model = KAN(
-		width=[2, [5,3], 1], 
+		width=[2, [5,5], 1], 
 		grid=20, 
 		seed=i,
 		grid_range=f_range,
-		# atom_names=safe_lib,
-		# numeric_atom_configs={
-		# 	"stepbf": {"num_grids": 20, "steepness": 10.},
-		# 	"rbf": {"num_grids": 50},
-		# },
+		atom_names=[],
+		numeric_atom_configs={
+			"step_bf": {"num_grids": 20, "steepness": 10.},
+			# "radial_bf": {"num_grids": 50},
+			"rational_bf": {"num_bases": 20, "degree_numerator": 3, "degree_denominator":2},
+		},
 	)
 
 	model.fit(dataset, opt="Adam", lr=1e-2, steps=1000, lamb=1e-3)
@@ -223,7 +224,7 @@ while not symbolic_formula or bad_mape(mape) or mape >= MAPE_THRESHOLD:
 	# print('model.get_symbolic_choice_per_edge:', model.get_symbolic_choice_per_edge())
 
 	# model.prune_symbolic_gates_topk(k=3)
-	summary = model.auto_symbolic_robust_greedy(
+	summary = model.greedy_symbolic_regression(
 		dataset,       # evaluation set
 		lib=safe_lib,
 		min_edge_score=0.1,
@@ -232,7 +233,7 @@ while not symbolic_formula or bad_mape(mape) or mape >= MAPE_THRESHOLD:
 		steps=100,
 		top_k_gates=3
 	)
-	# print('auto_symbolic_robust_greedy:', summary)
+	# print('greedy_symbolic_regression:', summary)
 
 	# symbolic_formula = model.symbolic_formula(simplify=SIMPLIFY)
 	# if symbolic_formula:

@@ -471,13 +471,13 @@ class GatedSymbolicLayer(nn.Module):
 
 	def __init__(
 		self,
-		input_dim: int,
-		output_dim: int,
-		atom_names: List[str],
+		input_dim,
+		output_dim,
+		atom_names,
 		*,
-		init_atom_bias: float = 0.0,
-		symbolic_scale: float = 1.0,
-		use_base_update: bool = True,
+		init_atom_bias = 0.0,
+		symbolic_scale = 1.0,
+		use_base_update = True,
 		base_activation = F.silu,
 		# fn_name -> kwargs, e.g. {"step_bf": {...}, "rbf": {...}}
 		numeric_atom_configs: Optional[Dict[str, Dict[str, Any]]] = None,
@@ -489,6 +489,7 @@ class GatedSymbolicLayer(nn.Module):
 		self.out_dim = output_dim
 		self.base_atom_names = list(atom_names)          # atoms from SYMBOLIC_LIB
 		self.symbolic_scale = symbolic_scale
+		self.init_atom_bias = init_atom_bias
 
 		self.use_base_update = use_base_update
 		if use_base_update:
@@ -502,11 +503,7 @@ class GatedSymbolicLayer(nn.Module):
 		else:
 			self._numeric_atom_configs = {}
 
-		# For each numeric fn_name we create:
-		#   - one shared basis module (self.numeric_atoms[fn_name])
-		#   - per-edge coefficients in self.numeric_coefs[fn_name] with shape [out_dim, in_dim, G]
 		self.numeric_atoms = nn.ModuleDict()
-		# fn_name -> per-edge coefficients over the basis grid
 		self.numeric_coefs = nn.ParameterDict()
 
 		numeric_names = []
@@ -558,7 +555,6 @@ class GatedSymbolicLayer(nn.Module):
 		self._gate_mask_hook = None
 
 		# per-edge per-atom affine params: [out_dim, in_dim, K, 4] = (a,b,c,d)
-		# these are ONLY USED for symbolic atoms, ignored for numeric ones
 		if self.num_atoms > 0:
 			self.affine = nn.Parameter(
 				torch.zeros(self.out_dim, self.in_dim, self.num_atoms, 4)
@@ -612,7 +608,7 @@ class GatedSymbolicLayer(nn.Module):
 	# ------------------------------------------------------------------
 	# core symbolic computation
 	# ------------------------------------------------------------------
-	def _symbolic_vals(self, pre: torch.Tensor) -> torch.Tensor:
+	def _symbolic_vals(self, pre):
 		"""
 		pre: [B, in_dim]
 
@@ -690,15 +686,11 @@ class GatedSymbolicLayer(nn.Module):
 		return sym_vals   # [B,O,I,K]
 
 
+
 	# ------------------------------------------------------------------
 	# forward: KAN-compatible signature
 	# ------------------------------------------------------------------
-	def forward(
-		self,
-		x: torch.Tensor,
-		time_benchmark: bool = True,
-		temperature: Optional[float] = None,
-	):
+	def forward(self, x, time_benchmark = True, temperature = None):
 		"""
 		x: [B, in_dim]
 
@@ -759,28 +751,18 @@ class GatedSymbolicLayer(nn.Module):
 	def prune_gates_topk(
 		self,
 		k: int,
-		symbolic_only: bool = True,
 	):
 		"""
 		For each edge (i->j), keep only top-k atoms (by current logits) and
 		prune the rest by setting gate_mask=0 for them.
 
-		If symbolic_only=True, only consider atoms from base_atom_names
-		(i.e. SYMBOLIC_LIB) and do not count numeric atoms (e.g. step_bf/rbf)
-		towards the top-k.
 		"""
 
 		O, I, K = self.gate_logits.shape
 		device = self.gate_logits.device
 
 		# build index sets once
-		if symbolic_only:
-			symbolic_idxs = [
-				idx for idx, name in enumerate(self.atom_names)
-				if name in self.base_atom_names
-			]
-		else:
-			symbolic_idxs = list(range(K))
+		symbolic_idxs = list(range(K))
 
 		if len(symbolic_idxs) <= k:
 			# nothing to prune on symbolic side
@@ -831,7 +813,7 @@ class GatedSymbolicLayer(nn.Module):
 	# utilities for pruning / swapping / reading choices
 	# ------------------------------------------------------------------
 	@torch.no_grad()
-	def get_symbolic_choices(self) -> Dict[Tuple[int, int], str]:
+	def get_symbolic_choices(self):
 		"""
 		Returns:
 		  dict[(i, j)] = best_atom_name
@@ -852,9 +834,9 @@ class GatedSymbolicLayer(nn.Module):
 
 	def gating_regularizer(
 		self,
-		entropy_weight: float = 1e-3,
-		l1_weight: float = 0.0,
-	) -> torch.Tensor:
+		entropy_weight = 1e-3,
+		l1_weight = 0.0,
+	):
 		"""
 		Encourage gates to become somewhat sharp + keep logits bounded.
 
@@ -875,7 +857,7 @@ class GatedSymbolicLayer(nn.Module):
 		return entropy_weight * mean_ent + l1_weight * l1
 
 	@torch.no_grad()
-	def get_subset(self, in_ids: torch.Tensor, out_ids: torch.Tensor):
+	def get_subset(self, in_ids, out_ids):
 		"""
 		For pruning: return a new layer restricted to selected inputs/outputs.
 		"""
@@ -886,10 +868,10 @@ class GatedSymbolicLayer(nn.Module):
 			input_dim=in_ids.numel(),
 			output_dim=out_ids.numel(),
 			atom_names=self.base_atom_names,
-			init_atom_bias=0.0,
+			init_atom_bias=self.init_atom_bias,
 			symbolic_scale=self.symbolic_scale,
 			use_base_update=self.use_base_update,
-			base_activation=getattr(self, "base_activation", F.silu),
+			base_activation=self.base_activation,
 			numeric_atom_configs=self._numeric_atom_configs,
 		).to(self.mask.device)
 
@@ -912,14 +894,11 @@ class GatedSymbolicLayer(nn.Module):
 
 		# --- numeric atoms: shared basis + per-edge coefficients ---
 		for name, basis in self.numeric_atoms.items():
-			# basis is shared across all edges ⇒ just copy the entire module
 			new_basis = new.numeric_atoms[name]
 			new_basis.load_state_dict(basis.state_dict())
 
-			# subset the coefficient tensor: [out_dim, in_dim, G] -> [new_out, new_in, G]
 			coef     = self.numeric_coefs[name]        # [old_O, old_I, G]
 			new_coef = new.numeric_coefs[name]         # [new_O, new_I, G]
-
 			new_coef.data.copy_(coef.data[out_ids][:, in_ids, :])
 
 		# meta
