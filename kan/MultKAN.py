@@ -1969,7 +1969,7 @@ class MultKAN(nn.Module):
 							l=l,
 							i=i,
 							j=j,
-							hidden_nodes=0,
+							hidden_nodes=self.chain_nodes,
 							op="mul" if fun_name == "multiplication" else "div",
 							verbose=(verbose >= 2),
 						)
@@ -2134,7 +2134,7 @@ class MultKAN(nn.Module):
 					l=l,
 					i=i,
 					j=j,
-					hidden_nodes=0,
+					hidden_nodes=self.chain_nodes,
 					op="mul" if best_function == "multiplication" else "div",
 					verbose=(verbose >= 2),
 				)
