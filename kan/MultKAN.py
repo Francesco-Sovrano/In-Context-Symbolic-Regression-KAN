@@ -2094,8 +2094,7 @@ class MultKAN(nn.Module):
 				if torch.isfinite(val):
 					j, i = torch.nonzero(cand == val, as_tuple=False)[0]  # first argmax
 					s = float(val.item())
-					# NOTE: this preserves your original "<" choice (not ">")
-					if (best is None) or (s < best[0]):
+					if (best is None) or (s > best[0]):
 						best = (s, l, int(i.item()), int(j.item()))
 
 			if best is None:
