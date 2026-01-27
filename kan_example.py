@@ -99,14 +99,14 @@ model = KAN(
 	grid=20, 
 	grid_range=f_range,
 	seed=0,
-	# atom_names=lib,
-	numeric_atom_configs={
-		"step_bf": {"num_grids": 20, "steepness": 10.},
-		# "radial_bf": {"num_grids": 50},
-		"rational_bf": {"num_bases": 20, "degree_numerator": 3, "degree_denominator":2},
-	},
-	chain_nodes=2,
-	chain_types=['multiplication','division'],
+	atom_names=lib,
+	# numeric_atom_configs={
+	# 	"step_bf": {"num_grids": 20, "steepness": 10.},
+	# 	# "radial_bf": {"num_grids": 50},
+	# 	"rational_bf": {"num_bases": 20, "degree_numerator": 3, "degree_denominator":2},
+	# },
+	# chain_nodes=2,
+	# chain_types=['multiplication','division'],
 )
 
 # print("kan imported from:", kan.__file__)
@@ -125,13 +125,13 @@ training_options = dict(
 	lamb=1e-2, # lamb_l1 > 0 → pushes spline outputs/attributions toward sparse/low magnitude
 	# lamb_coefdiff=10.0, # lamb_coefdiff > 0 → enforces smooth, near-linear splines. A smooth, small-magnitude 1D spline naturally gravitates toward “constant” or “linear”
 	gating_entropy=1e-3, 
-	# gating_l1=1e-3, 
+	gating_l1=1e-2, 
 	# mult_node_weight_decay=1e-2
-	reg_metric='edge_backward', # or 'edge_forward_spline_u', 'edge_backward', 'node_backward'; avoid 'edge_forward_spline_n' since it's not meant for GatedSymbolicLayer
+	reg_metric='node_backward', # or 'edge_forward_spline_u', 'edge_backward', 'node_backward'; avoid 'edge_forward_spline_n' since it's not meant for GatedSymbolicLayer
 )
 
 model.fit(dataset, **training_options)
-for i in range(3):
+for i in range(1):
 	model = model.prune(node_th=0.1, edge_th=0, gate_top_k=max(3, 6-i))
 	model.fit(dataset, **training_options)
 	check_gates(model)
