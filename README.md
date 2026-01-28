@@ -58,18 +58,52 @@ Notes:
 
 ## Run `example_simple.py`
 
-From the repository root, you **must** pick a symbolic regression mode via `--symbolic_regression_method`:
+From the repository root, you **must** pick a symbolic regression mode via `--symbolic_regression_method` (required).
+
+### Quick start (copy/paste)
 
 ```bash
 # 1) Baseline: post-hoc symbolic fitting (fastest, simplest)
 python example_simple.py --symbolic_regression_method baseline
 
-# 2) Greedy matching pursuit: post-hoc greedy symbolic selection (often better)
+# 2) FastKAN baseline: same as baseline, but with lighter numeric atoms during training
+python example_simple.py --symbolic_regression_method fastkan_baseline
+
+# 3) Greedy matching pursuit: post-hoc greedy symbolic selection (often better)
 python example_simple.py --symbolic_regression_method greedy_matching_pursuit --simplify
 
-# 3) Gated + greedy matching pursuit: train with gated symbolic atoms, then greedy selection (most interpretable)
+# 4) FastKAN + greedy matching pursuit: greedy selection + lighter numeric atoms
+python example_simple.py --symbolic_regression_method fastkan_greedy_matching_pursuit --simplify
+
+# 5) Gated + greedy matching pursuit: train with gated symbolic atoms, then greedy selection (most interpretable)
 python example_simple.py --symbolic_regression_method gated_greedy_matching_pursuit --simplify
 ```
+
+### What each `--symbolic_regression_method` does
+
+- `baseline`  
+  - Train/prune a **standard KAN** (default numeric atoms: `bspline`).  
+  - Run `baseline_symbolic_regression(lib=...)`.  
+  - **No gated symbolic layers**; no per-edge gate/atom diagnostics.
+
+- `fastkan_baseline`  
+  - Same as `baseline`, but swaps numeric atoms from `bspline` to **FastKAN-style** `radial_bf` via `numeric_atom_configs`.  
+  - Intended to reduce per-step compute while keeping the same post-hoc symbolic regression.
+
+- `greedy_matching_pursuit`  
+  - Train/prune a **standard KAN**.  
+  - Run `greedy_symbolic_regression(dataset, lib=...)` (matching-pursuit style greedy selection).  
+  - Still **no gated symbolic layers** in the model (`atom_names` is not set).
+
+- `fastkan_greedy_matching_pursuit`  
+  - Same as `greedy_matching_pursuit`, but uses FastKAN-style numeric atoms (`radial_bf`) instead of `bspline`.
+
+- `gated_greedy_matching_pursuit`  
+  - Construct KAN with **gated symbolic layers** by passing `atom_names=lib`.  
+  - Train/prune **with gates**, then run `greedy_symbolic_regression(dataset, lib=...)`.  
+  - Enables gate-based inspectability (`check_gates`, `get_symbolic_choice_per_edge`) and `gate_top_k` pruning.
+
+> Note: the script selects behavior by substring checks (e.g., `"fastkan"` / `"gated"`), so the `fastkan_*` methods share the same symbolic-regression routine as their non-fastkan counterparts; only the **numeric atom configuration** changes.
 
 ### What you’ll see
 
@@ -81,7 +115,7 @@ python example_simple.py --symbolic_regression_method gated_greedy_matching_purs
 ### Useful knobs (common)
 
 - `--width 2 5 1` : network width (list)
-- `--grid 20` and `--grid_range -1 1` : spline grid and input range
+- `--grid 20` and `--grid_range -1 1` : basis grid and input range
 - `--steps 500`, `--lr 1e-2`, `--lamb 1e-2` : training hyperparameters
 - `--prune_iters 1`, `--node_th 0.1`, `--edge_th 0.0` : pruning controls
 - `--simplify / --no-simplify` : simplify the exported SymPy expression
