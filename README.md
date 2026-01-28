@@ -63,19 +63,19 @@ From the repository root, you **must** pick a symbolic regression mode via `--sy
 ### Quick start (copy/paste)
 
 ```bash
-# 1) Baseline: post-hoc symbolic fitting (fastest, simplest)
+# 1) Baseline: post-hoc symbolic fitting
 python example_simple.py --symbolic_regression_method baseline
 
 # 2) FastKAN baseline: same as baseline, but with lighter numeric atoms during training
 python example_simple.py --symbolic_regression_method fastkan_baseline
 
-# 3) Greedy matching pursuit: post-hoc greedy symbolic selection (often better)
+# 3) Greedy matching pursuit: post-hoc greedy symbolic selection
 python example_simple.py --symbolic_regression_method greedy_matching_pursuit --simplify
 
 # 4) FastKAN + greedy matching pursuit: greedy selection + lighter numeric atoms
 python example_simple.py --symbolic_regression_method fastkan_greedy_matching_pursuit --simplify
 
-# 5) Gated + greedy matching pursuit: train with gated symbolic atoms, then greedy selection (most interpretable)
+# 5) Gated + greedy matching pursuit: train with gated symbolic atoms, then greedy selection
 python example_simple.py --symbolic_regression_method gated_greedy_matching_pursuit --simplify
 ```
 
