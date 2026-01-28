@@ -14,3 +14,6 @@ mpmath
 more_itertools
 ollama
 openai
+
+## Experiments only
+pykan
