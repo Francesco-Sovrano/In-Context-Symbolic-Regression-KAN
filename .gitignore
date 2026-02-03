@@ -9,6 +9,7 @@ _backup/*
 primes_function.py
 data/*
 datasets/*
+datasets/*/*
 *.gz
 
 # Byte-compiled / optimized / DLL files
