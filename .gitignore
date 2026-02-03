@@ -8,6 +8,8 @@ model/*
 _backup/*
 primes_function.py
 data/*
+datasets/*
+*.gz
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
