@@ -125,7 +125,7 @@ def get_args():
 	p.add_argument(
 		"--gating_entropy",
 		type=float,
-		default=1e-2,
+		default=1e-3,
 		help="Entropy regularizer for gate distribution.",
 	)
 	p.add_argument(

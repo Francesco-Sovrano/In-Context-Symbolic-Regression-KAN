@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 from .KANLayer import KANLayer
-from .fastkan import GatedSymbolicLayer
+from .gated_kan import GatedSymbolicLayer
 #from .Symbolic_MultKANLayer import *
 from .Symbolic_KANLayer import Symbolic_KANLayer
 from .LBFGS import *
@@ -846,6 +846,20 @@ class MultKAN(nn.Module):
 
 			# combine numeric + symbolic + chained-KAN contributions
 			x = x_numerical + x_symbolic
+
+			if not torch.is_tensor(x_symbolic):
+				x_symbolic = torch.as_tensor(x_symbolic, device=preacts.device, dtype=preacts.dtype)
+
+			# if it's a scalar, expand to match preacts so later shape logic is safe
+			if x_symbolic.ndim == 0:
+				x_symbolic = x_symbolic.expand_as(preacts)
+
+			if x_symbolic.shape != preacts.shape:
+				if x_symbolic.ndim == 3 and x_symbolic.shape[1] == preacts.shape[2] and x_symbolic.shape[2] == preacts.shape[1]:
+					x_symbolic = x_symbolic.transpose(1, 2)
+				elif x_symbolic.ndim == 2:
+					x_symbolic = x_symbolic.unsqueeze(-1)   # -> [B, O, I]
+
 			preacts = preacts + x_symbolic
 			
 			if self.save_act:

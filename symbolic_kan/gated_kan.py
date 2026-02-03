@@ -278,6 +278,26 @@ NUMERIC_ATOM_FNS = {
 	"bspline": BSplineBasisFunction,
 }
 
+def masked_softmax_stable(logits, mask, dim=-1, eps=1e-8):
+	# logits: [..., K], mask: same shape (bool)
+	mask = mask.to(torch.bool)
+
+	# detect rows where everything is masked
+	all_masked = (~mask).all(dim=dim, keepdim=True)
+
+	# set invalid to -inf, but make "all-masked" rows finite before softmax
+	logits = logits.masked_fill(~mask, float("-inf"))
+	logits = logits.masked_fill(all_masked, 0.0)
+
+	# do softmax in fp32 for stability, then cast back
+	probs = F.softmax(logits, dim=dim, dtype=torch.float32).to(logits.dtype)
+
+	# zero out invalid and all-masked rows, then renormalize
+	probs = probs.masked_fill(~mask, 0.0)
+	denom = probs.sum(dim=dim, keepdim=True)
+	probs = torch.where(denom > 0, probs / (denom + eps), torch.zeros_like(probs))
+	return probs
+
 class GatedSymbolicLayer(nn.Module):
 	"""
 	Symbolic + numeric layer with differentiable gating over SYMBOLIC_LIB atoms
@@ -434,7 +454,7 @@ class GatedSymbolicLayer(nn.Module):
 	# ------------------------------------------------------------------
 	# core symbolic computation
 	# ------------------------------------------------------------------
-	def _symbolic_vals(self, pre):
+	def _symbolic_vals(self, pre, time_benchmark=False):
 		"""
 		pre: [B, in_dim]
 
@@ -488,6 +508,9 @@ class GatedSymbolicLayer(nn.Module):
 			sym_vals[..., k_idx] = sv
 
 		# ---------------- NUMERIC ATOMS ----------------
+		if not time_benchmark:
+			pre = self.layernorm(pre)   # [B,I]
+
 		offset = num_sym
 		for k, name in enumerate(self._numeric_atom_configs.keys()):
 			# shared basis for this numeric atom type
@@ -520,10 +543,7 @@ class GatedSymbolicLayer(nn.Module):
 		if temperature is None:
 			temperature = 1.0
 
-		if not time_benchmark:
-			pre = self.layernorm(x)   # [B,I]
-		else:
-			pre = x                   # [B,I]
+		pre = x
 
 		B, I = pre.shape
 		O = self.out_dim
@@ -534,20 +554,20 @@ class GatedSymbolicLayer(nn.Module):
 		preacts = pre.unsqueeze(1).expand(B, O, I)    # [B,O,I]
 
 		# 1) symbolic + numeric candidates per-edge
-		sym_vals = self._symbolic_vals(pre)          # [B,O,I,K]
+		sym_vals = self._symbolic_vals(pre, time_benchmark=time_benchmark)          # [B,O,I,K]
+
+		M = 5.0
+		sym_vals = M * torch.tanh(sym_vals / M)
 
 		# 2) gating over atoms
 		if K == 0:
 			edge_out = torch.zeros(B, O, I, device=device)
 		else:
-			logits = self.gate_logits / float(temperature)   # [O,I,K]
-			mask = self.gate_mask.bool()                      # [O,I,K]
-			masked_logits = logits.masked_fill(~mask, -1e9)   # avoid -inf
-			probs = torch.softmax(masked_logits, dim=-1)      # [O,I,K]
-			probs = probs * mask                              # zero out invalid
-			probs = probs / (probs.sum(-1, keepdim=True) + 1e-8)
-			probs = probs.unsqueeze(0)                        # [1,O,I,K]
-			edge_out = (sym_vals * probs).sum(dim=-1)               # [B,O,I]
+			logits = self.gate_logits / float(max(temperature, 1e-3))   # also avoid tiny temp
+			mask = self.gate_mask.bool()
+			probs = masked_softmax_stable(logits, mask, dim=-1)         # [O,I,K]
+			probs = probs.unsqueeze(0)                                  # [1,O,I,K]
+			edge_out = (sym_vals * probs).sum(dim=-1)                   # [B,O,I]
 
 		# 2b) optional base_update like FastKANLayer
 		if self.use_base_update:
