@@ -898,11 +898,13 @@ class MultKAN(nn.Module):
 							x_mult_j = x_mult_j * x[:, [acml_id+i+1]]
 					x_mult = x_mult_j if x_mult is None else torch.cat([x_mult, x_mult_j], dim=1)
 
-			# if dim_mult > 0:
-			#   x = torch.cat([x[:, :dim_sum], x_mult], dim=1)
-			#   # # scale multiplicative part by an annealed scalar mult_alpha[l]
-			#   # alpha = self.mult_alpha[l]
-			#   # x = torch.cat([x[:, :dim_sum], alpha * x_mult], dim=1)
+			if dim_mult > 0:
+				x = torch.cat([x[:, :dim_sum], x_mult], dim=1)
+				# # scale multiplicative part by an annealed scalar mult_alpha[l]
+				# alpha = self.mult_alpha[l]
+				# x = torch.cat([x[:, :dim_sum], alpha * x_mult], dim=1)
+			else:
+				x = x[:, :dim_sum]   # optional; keeps things explicit
 			
 			# x = x + self.biases[l].weight
 			# node affine transform
