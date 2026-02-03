@@ -105,7 +105,7 @@ def get_args():
 		"--width",
 		nargs="+",
 		type=int,
-		default=[2, 5, 1],
+		default=[2, [5,2], 1],
 		help="Network width list, e.g. --width 2 5 1",
 	)
 	p.add_argument("--grid", type=int, default=20, help="Spline/basis grid size.")
