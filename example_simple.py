@@ -120,12 +120,12 @@ def get_args():
 
 	# Training
 	p.add_argument("--lr", type=float, default=1e-2, help="Learning rate.")
-	p.add_argument("--steps", type=int, default=1000, help="Steps per fit() call.")
+	p.add_argument("--steps", type=int, default=500, help="Steps per fit() call.")
 	p.add_argument("--lamb", type=float, default=1e-2, help="Spline L1 regularization.")
 	p.add_argument(
 		"--gating_entropy",
 		type=float,
-		default=0,
+		default=1e-2,
 		help="Entropy regularizer for gate distribution.",
 	)
 	p.add_argument(
@@ -137,7 +137,7 @@ def get_args():
 	p.add_argument(
 		"--reg_metric",
 		choices=["node_backward", "edge_backward", "edge_forward_spline_u"],
-		default="node_backward",
+		default="edge_backward",
 		help="Regularization metric (avoid edge_forward_spline_n for gated symbolic layers).",
 	)
 
@@ -145,7 +145,7 @@ def get_args():
 	p.add_argument(
 		"--prune_iters",
 		type=int,
-		default=2,
+		default=5,
 		help="How many prune+refit rounds to run (default: 1).",
 	)
 	p.add_argument("--node_th", type=float, default=0.1, help="Node pruning threshold.")
