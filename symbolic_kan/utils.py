@@ -80,7 +80,9 @@ def _safe_pos(x, eps=None, beta=50.0):
 
 def _safe_log(x, eps=None, beta=50.0):
 	"""log(max(x, eps)) with smooth floor so gradients don’t die."""
-	return torch.log(_safe_pos(x, eps=eps, beta=beta))
+	r = torch.log(_safe_pos(x.abs(), eps=eps, beta=beta))
+	r = _safe_clamp(r, 1e5, -1e5)
+	return r
 
 def _safe_invpow(x, k, eps=None):
 	"""
@@ -88,29 +90,28 @@ def _safe_invpow(x, k, eps=None):
 	Even k -> positive; odd k -> keeps sign(x).
 	"""
 	if eps is None: eps = _eps_like(x, 1024.0)
-	ax = _safe_abs(x, eps)                      # ~ |x|
+	ax = _safe_pos(x.abs(), eps)
 	denom = ax.pow(k) + (eps ** k)
 	if k % 2 == 0:
-		return 1.0 / denom
+		r = 1.0 / denom
 	else:
-		return _safe_sign(x) * (1.0 / denom)
+		r = _safe_sign(x) * (1.0 / denom)
+	r = _safe_clamp(r, 1e5, -1e5)
+	return r
 
 def _safe_recip(x, eps=None):
 	"""Smooth reciprocal: x / (x^2 + eps^2)."""
 	if eps is None: eps = _eps_like(x, 1024.0)
-	return x / (x*x + eps*eps)
-
-def _safe_abs(x, eps=None):
-	"""Smooth |x| ~ sqrt(x^2 + eps^2)."""
-	if eps is None: eps = _eps_like(x, 1024.0)
-	return torch.sqrt(x*x + eps*eps)
+	r = x / (x*x + eps*eps)
+	r = _safe_clamp(r, 1e5, -1e5)
+	return r
 
 def _safe_sign(x, k=64.0):
 	"""Smooth sign via tanh(kx); k controls sharpness."""
 	return torch.tanh(torch.as_tensor(k, dtype=x.dtype, device=x.device) * x)
 
 def _safe_sqrt(x):
-	return torch.sqrt(_safe_pos(x, eps=0))
+	return torch.sqrt(_safe_pos(x.abs(), eps=0))
 
 def _safe_invsqrt(x):
 	return _safe_recip(_safe_sqrt(x))
@@ -182,7 +183,7 @@ SYMBOLIC_LIB = {
 
 	'sqrt':        (lambda x: _safe_sqrt(x),       lambda x: sympy.sqrt(x),     2, f_sqrt),
 	# 'x^0.5':       (lambda x: _safe_sqrt(x),       lambda x: sympy.sqrt(x),     2, f_sqrt),
-	'x^1.5': (lambda x: _safe_abs(x)**1.5, lambda x: sympy.Abs(x)**sympy.Rational(3,2), 4, f_power1d5),
+	'x^1.5': (lambda x: x.abs()**1.5, lambda x: sympy.Abs(x)**sympy.Rational(3,2), 4, f_power1d5),
 
 	'1/sqrt(x)':   (lambda x: _safe_invsqrt(x),    lambda x: 1/sympy.sqrt(x),   2, f_invsqrt),
 	# '1/x^0.5':     (lambda x: _safe_invsqrt(x),    lambda x: 1/sympy.sqrt(x),   2, f_invsqrt),
@@ -190,7 +191,7 @@ SYMBOLIC_LIB = {
 	'exp':         (lambda x: _safe_exp(x),        lambda x: sympy.exp(x),      2, f_exp),
 	'log':         (lambda x: _safe_log(x),        lambda x: sympy.log(x),      2, f_log),
 
-	'abs':         (lambda x: _safe_abs(x),    lambda x: sympy.Abs(x),  3, None),
+	'abs':         (lambda x: x.abs(),    lambda x: sympy.Abs(x),  3, None),
 	'sin':         (lambda x: torch.sin(x),    lambda x: sympy.sin(x),  2, None),
 	'cos':         (lambda x: torch.cos(x),    lambda x: sympy.cos(x),  2, None),
 	'tan':         (lambda x: _safe_tan(x),    lambda x: sympy.tan(x),  3, f_tan),

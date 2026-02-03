@@ -120,18 +120,18 @@ def get_args():
 
 	# Training
 	p.add_argument("--lr", type=float, default=1e-2, help="Learning rate.")
-	p.add_argument("--steps", type=int, default=500, help="Steps per fit() call.")
+	p.add_argument("--steps", type=int, default=1000, help="Steps per fit() call.")
 	p.add_argument("--lamb", type=float, default=1e-2, help="Spline L1 regularization.")
 	p.add_argument(
 		"--gating_entropy",
 		type=float,
-		default=1e-3,
+		default=0,
 		help="Entropy regularizer for gate distribution.",
 	)
 	p.add_argument(
 		"--gating_l1",
 		type=float,
-		default=1e-2,
+		default=0,
 		help="L1 regularizer for gating weights/masks.",
 	)
 	p.add_argument(
@@ -308,7 +308,7 @@ def main():
 	print(dataset["train_input"].shape, dataset["train_label"].shape)
 
 	# Symbol library (always used for symbolic regression; also used as atom_names only for gated_greedy_matching_pursuit)
-	lib = ["0", "x", "x^2", "exp", "log", "sqrt", "tanh", "sin", "abs"]
+	lib = ["0", "x", "x^2", "exp", "log", "sqrt", "tanh", "sin", "abs", "1/x", "1/x^2"]
 
 	# Build model
 	kan_kwargs = dict(

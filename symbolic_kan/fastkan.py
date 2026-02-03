@@ -473,27 +473,19 @@ class GatedSymbolicLayer(nn.Module):
 			arg_k = arg[..., k_idx]             # [B,O,I]
 			torch_fun = SYMBOLIC_LIB[name][0]
 
-			# crude domain fixes for logs/sqrts
-			if "log" in name.lower():
-				arg_local = arg_k.abs() + 1e-3
-			elif "sqrt" in name.lower():
-				arg_local = arg_k.abs()
-			else:
-				arg_local = arg_k
-
-			v = torch_fun(arg_local)            # broadcasting
+			v = torch_fun(arg_k)            # broadcasting
 
 			# ensure [B,O,I]
 			while v.ndim < 3:
 				v = v.unsqueeze(-1)
 			v = v.reshape(B, O, I)
 
-			v = torch.nan_to_num(v, nan=0.0, posinf=1e3, neginf=-1e3)
-
 			c_k = c_b[..., k_idx]       # [1,O,I]
 			d_k = d_b[..., k_idx]
 
-			sym_vals[..., k_idx] = d_k + c_k * v
+			sv = torch.nan_to_num(d_k + c_k * v, nan=0.0, posinf=1e5, neginf=-1e5)
+			sv = sv.clamp(-1e5, 1e5)
+			sym_vals[..., k_idx] = sv
 
 		# ---------------- NUMERIC ATOMS ----------------
 		offset = num_sym
@@ -507,7 +499,6 @@ class GatedSymbolicLayer(nn.Module):
 
 			sym_vals[:, :, :, offset + k] = atom_vals
 
-		sym_vals = torch.nan_to_num(sym_vals, nan=0.0, posinf=1e3, neginf=-1e3)
 		sym_vals = self.symbolic_scale * sym_vals
 		return sym_vals   # [B,O,I,K]
 
@@ -550,10 +541,12 @@ class GatedSymbolicLayer(nn.Module):
 			edge_out = torch.zeros(B, O, I, device=device)
 		else:
 			logits = self.gate_logits / float(temperature)   # [O,I,K]
-			# apply pruning mask – disabled atoms get -inf logits
-			masked_logits = logits.masked_fill(self.gate_mask == 0, float('-inf'))
-
-			probs  = F.softmax(masked_logits, dim=-1).unsqueeze(0)  # [1,O,I,K]
+			mask = self.gate_mask.bool()                      # [O,I,K]
+			masked_logits = logits.masked_fill(~mask, -1e9)   # avoid -inf
+			probs = torch.softmax(masked_logits, dim=-1)      # [O,I,K]
+			probs = probs * mask                              # zero out invalid
+			probs = probs / (probs.sum(-1, keepdim=True) + 1e-8)
+			probs = probs.unsqueeze(0)                        # [1,O,I,K]
 			edge_out = (sym_vals * probs).sum(dim=-1)               # [B,O,I]
 
 		# 2b) optional base_update like FastKANLayer
