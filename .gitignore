@@ -8,8 +8,7 @@ model/*
 _backup/*
 primes_function.py
 data/*
-datasets/*
-datasets/*/*
+symbolic_kan/datasets/*
 *.gz
 
 # Byte-compiled / optimized / DLL files
