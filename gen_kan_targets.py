@@ -19,10 +19,10 @@ Notes on "x^2", "1/x", "1/x^2":
   These still only use atoms in lib (+/- and constants).
 
 Example:
-  ./gen_kan_targets.py --n_var 5 --num_funcs 100 --seed 0
+  python3 gen_kan_targets.py --n_var 5 --num_funcs 100 --seed 0
 
 CSV example:
-  ./gen_kan_targets.py --n_var 5 --num_funcs 100 --seed 0 --emit_csv data/targets.csv
+  python3 gen_kan_targets.py --n_var 5 --num_funcs 100 --seed 0 --emit_csv data/targets.csv
 """
 
 from __future__ import annotations
