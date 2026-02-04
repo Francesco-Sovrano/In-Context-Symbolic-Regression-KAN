@@ -33,7 +33,7 @@ Notes:
 """
 
 """
-python example_simple.py \
+python3 example_simple.py \
   --symbolic_regression_method gated_greedy_matching_pursuit \
   --targets_csv data/targets.csv \
   --targets_max 10 \
