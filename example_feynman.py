@@ -69,14 +69,14 @@ def get_args():
 
 	# Repro / data
 	p.add_argument("--seed", type=int, default=0, help="Random seed (default: 0).")
-	p.add_argument("--train_num", type=int, default=4000, help="Training samples.")
-	p.add_argument("--test_num", type=int, default=2000, help="Test samples.")
+	p.add_argument("--train_num", type=int, default=2000, help="Training samples.")
+	p.add_argument("--test_num", type=int, default=1000, help="Test samples.")
 
 	# Model
 	#width 5 10, 20, 50, 100
 	#width [5,2] [10,2], [20,2], [50,2], [100,2]
 	#I.26.2,26,theta1,arcsin(n*sin(theta2)), [2,[5,2],1] una moltiplicazione e un solo innestamento
-	p.add_argument('--top_k_gates', type=int, default=5)
+	p.add_argument('--top_k_gates', type=int, default=3)
 	p.add_argument(
 		"--width",
 		nargs="+",
@@ -97,7 +97,7 @@ def get_args():
 	# Training
 	p.add_argument("--lr", type=float, default=1e-2, help="Learning rate.")
 	p.add_argument("--steps", type=int, default=500, help="Steps per fit() call.")
-	p.add_argument("--lamb", type=float, default=1e-3, help="Spline L1 regularization.")
+	p.add_argument("--lamb", type=float, default=1e-2, help="Spline L1 regularization.")
 	p.add_argument(
 		"--gating_entropy",
 		type=float,
