@@ -434,6 +434,8 @@ class GatedSymbolicLayer(nn.Module):
 			torch.zeros(self.out_dim * self.in_dim, 1),
 			requires_grad=False
 		)
+		self.comp_log_s = torch.nn.Parameter(torch.zeros(self.out_dim, self.in_dim, self.num_atoms))
+
 
 	# ------------------------------------------------------------------
 	# KAN-ish API bits
@@ -556,8 +558,11 @@ class GatedSymbolicLayer(nn.Module):
 		# 1) symbolic + numeric candidates per-edge
 		sym_vals = self._symbolic_vals(pre, time_benchmark=time_benchmark)          # [B,O,I,K]
 
-		M = 5.0
-		sym_vals = M * torch.tanh(sym_vals / M)
+		def compress_asinh_scaled(x, log_s):
+			s = torch.exp(log_s).clamp_min(1e-6)   # [O,I,K]
+			s = s.unsqueeze(0)                     # [1,O,I,K]
+			return s * torch.asinh(x / s)
+		sym_vals = compress_asinh_scaled(sym_vals, self.comp_log_s)
 
 		# 2) gating over atoms
 		if K == 0:

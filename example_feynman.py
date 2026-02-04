@@ -76,7 +76,16 @@ def get_args():
 	#width 5 10, 20, 50, 100
 	#width [5,2] [10,2], [20,2], [50,2], [100,2]
 	#I.26.2,26,theta1,arcsin(n*sin(theta2)), [2,[5,2],1] una moltiplicazione e un solo innestamento
-	p.add_argument('--top_k_gates', type=int, default=3)
+	p.add_argument('--top_k_gates', type=int, default=5)
+	p.add_argument('--regression_policy', default='best',
+		choices=[
+			"best", # global max score
+			"worst", # global min score
+			"ltr", # "left-to-right": first eligible by (i asc, j asc, layer asc)
+			"rtl", # "right-to-left": first eligible by (i desc, j desc, layer desc)
+			"random", # uniform over all eligible edges
+		]
+	)
 	p.add_argument(
 		"--width",
 		nargs="+",
@@ -89,11 +98,11 @@ def get_args():
 	# Training
 	p.add_argument("--lr", type=float, default=1e-2, help="Learning rate.")
 	p.add_argument("--steps", type=int, default=500, help="Steps per fit() call.")
-	p.add_argument("--lamb", type=float, default=1e-2, help="Spline L1 regularization.")
+	p.add_argument("--lamb", type=float, default=3e-3, help="Spline L1 regularization.")
 	p.add_argument(
 		"--gating_entropy",
 		type=float,
-		default=1e-2,
+		default=1e-3,
 		help="Entropy regularizer for gate distribution.",
 	)
 	p.add_argument(
@@ -116,7 +125,6 @@ def get_args():
 		default=5,
 		help="How many prune+refit rounds to run (default: 1).",
 	)
-	#p.add_argument("--node_th", type=float, default=0.1, help="Node pruning threshold.")
 	p.add_argument("--node_th", type=float, default=0.1, help="Node pruning threshold.")
 	p.add_argument("--edge_th", type=float, default=0.0, help="Edge pruning threshold.")
 	p.add_argument(
@@ -530,6 +538,7 @@ def main():
 					dataset,
 					lib=lib,
 					top_k_gates=args.top_k_gates,
+					policy=args.regression_policy,
 					**symbolic_training_options,
 				)
 			print("greedy_symbolic_regression:", summary)

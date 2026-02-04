@@ -23,6 +23,20 @@ import contextlib, signal, sympy as sp
 import math
 import re
 
+def _norm_policy(policy):
+	p = policy.lower().replace("_", "-").strip()
+	if p in ("best", "max"): return "best"
+	if p in ("worst", "min"): return "worst"
+	if p in ("ltr", "left-to-right", "left2right"): return "ltr"
+	if p in ("rtl", "right-to-left", "right2left"): return "rtl"
+	if p in ("random", "rand"): return "random"
+	raise ValueError(f"Unknown edge policy: {policy}")
+
+def _randrange(n, gen):
+	if gen is None:
+		return random.randrange(n)
+	return int(torch.randint(n, (1,), generator=gen).item())
+
 def compactify_symbolic_formula(f):
 	f = str(f)
 	f = re.sub(r'(\d+\.\d\d\d\d)\d+', r'\1', f)
@@ -2109,6 +2123,7 @@ class MultKAN(nn.Module):
 		steps=200,
 		lamb=0,
 		top_k_gates=1,
+		policy='best',
 		**args
 	):
 		"""
@@ -2318,6 +2333,7 @@ class MultKAN(nn.Module):
 		# -------------------------------------------------------------------------
 		# Main greedy loop
 		# -------------------------------------------------------------------------
+		policy = _norm_policy(policy)
 		while not nothing_left:
 			i_fn += 1
 
@@ -2326,20 +2342,78 @@ class MultKAN(nn.Module):
 			layer_scores = [s.detach().clone() for s in self.edge_scores]  # each: (out_dim, in_dim)
 
 			# === FIND THE SINGLE BEST EDGE (global across layers) ===
-			best = None  # (score, l, i, j)
+			best = None      # (score, l, i, j)
+			best_key = None  # (i, j, l) for ltr/rtl tiebreaks
+			total = 0        # for random (weighted reservoir over layers)
 
 			for l, scores, num_mask, sym_off in iter_numeric_edges(layer_scores):
-				cand = scores.clone()
-				cand[~num_mask] = -float("inf")
-				cand[~sym_off] = -float("inf")
+				elig = num_mask & sym_off & torch.isfinite(scores)
+				if not elig.any():
+					continue
 
-				# pick best in this layer (no threshold here)
-				val = torch.max(cand)
-				if torch.isfinite(val):
-					j, i = torch.nonzero(cand == val, as_tuple=False)[0]  # first argmax
-					s = float(val.item())
-					if (best is None) or (s > best[0]):
-						best = (s, l, int(i.item()), int(j.item()))
+				if policy == "best":
+					cand = scores.clone()
+					cand[~elig] = -float("inf")
+					val = torch.max(cand)
+					if torch.isfinite(val):
+						j, i = torch.nonzero(cand == val, as_tuple=False)[0]  # first argmax
+						s = float(val.item())
+						key = (int(i.item()), int(j.item()), int(l))
+						if (best is None) or (s > best[0]) or (s == best[0] and key < best_key):
+							best = (s, int(l), int(i.item()), int(j.item()))
+							best_key = key
+
+				elif policy == "worst":
+					cand = scores.clone()
+					cand[~elig] = float("inf")
+					val = torch.min(cand)
+					if torch.isfinite(val):
+						j, i = torch.nonzero(cand == val, as_tuple=False)[0]  # first argmin
+						s = float(val.item())
+						key = (int(i.item()), int(j.item()), int(l))
+						if (best is None) or (s < best[0]) or (s == best[0] and key < best_key):
+							best = (s, int(l), int(i.item()), int(j.item()))
+							best_key = key
+
+				elif policy == "ltr":
+					js, is_ = torch.nonzero(elig, as_tuple=True)  # row=j, col=i
+					H = scores.size(0)
+					k = torch.argmin(is_ * H + js)               # i-major ordering
+					i0 = int(is_[k].item()); j0 = int(js[k].item())
+					s0 = float(scores[j0, i0].item())
+					key = (i0, j0, int(l))
+					if (best is None) or (key < best_key):
+						best = (s0, int(l), i0, j0)
+						best_key = key
+
+				elif policy == "rtl":
+					js, is_ = torch.nonzero(elig, as_tuple=True)
+					H = scores.size(0)
+					k = torch.argmax(is_ * H + js)              # i-major ordering, reversed by argmax
+					i0 = int(is_[k].item()); j0 = int(js[k].item())
+					s0 = float(scores[j0, i0].item())
+					key = (i0, j0, int(l))
+					if (best is None) or (key > best_key):
+						best = (s0, int(l), i0, j0)
+						best_key = key
+
+				elif policy == "random":
+					# uniform over all eligible edges, without materializing all edges globally
+					n = int(elig.sum().item())
+					js, is_ = torch.nonzero(elig, as_tuple=True)
+					pick = _randrange(n, gen=rng)  # rng: torch.Generator | None
+					i0 = int(is_[pick].item()); j0 = int(js[pick].item())
+					s0 = float(scores[j0, i0].item())
+
+					# weighted reservoir sampling over layers by eligible counts
+					if best is None:
+						best = (s0, int(l), i0, j0)
+						total = n
+					else:
+						r = _randrange(total + n, gen=rng)
+						if r < n:
+							best = (s0, int(l), i0, j0)
+						total += n
 
 			if best is None:
 				if verbose >= 1:
