@@ -102,7 +102,7 @@ def _safe_invpow(x, k, eps=None):
 def _safe_recip(x, eps=None):
 	"""Smooth reciprocal: x / (x^2 + eps^2)."""
 	if eps is None: eps = _eps_like(x, 1024.0)
-	r = x / (x*x + eps*eps)
+	r = 1.0 / _safe_pos(x, eps)
 	r = _safe_clamp(r, 1e5, -1e5)
 	return r
 
@@ -116,27 +116,62 @@ def _safe_sqrt(x):
 def _safe_invsqrt(x):
 	return _safe_recip(_safe_sqrt(x))
 
-def _safe_clamp(x, lo, hi, *, beta=64.0, nan_fill=0.0):
-	"""
-	C∞-smooth approximation to clamp using softplus.
-	  y ≈ lo + softplus(x-lo) - softplus(x-hi)
-	As beta↑, it approaches hard clamp.
-	Handles one-sided bounds too.
-	"""
-	x = torch.nan_to_num(x, nan=nan_fill, posinf=float('inf'), neginf=-float('inf'))
-	lo = torch.as_tensor(lo, device=x.device, dtype=x.dtype) if lo is not None else None
-	hi = torch.as_tensor(hi, device=x.device, dtype=x.dtype) if hi is not None else None
-	if (lo is not None) and (hi is not None):
-		lo, hi = torch.minimum(lo, hi), torch.maximum(lo, hi)
+def _softplus_stable(z: torch.Tensor, beta: float = 64.0) -> torch.Tensor:
+    """
+    Smooth, numerically stable softplus:
+      softplus(z) = (log1p(exp(-|t|)) + max(t, 0)) / beta   where t = beta*z
+    This avoids overflow because exp(-|t|) is in [0, 1].
+    """
+    beta_t = torch.as_tensor(beta, device=z.device, dtype=z.dtype)
 
-	if (lo is not None) and (hi is not None):
-		return lo + F.softplus(x - lo, beta=beta) - F.softplus(x - hi, beta=beta)
-	elif lo is not None:  # lower-bound only
-		return lo + F.softplus(x - lo, beta=beta)
-	elif hi is not None:  # upper-bound only
-		return x - F.softplus(x - hi, beta=beta)
-	else:
-		return x
+    # Do the softplus math in fp32 for fp16/bf16 to reduce overflow/precision issues.
+    compute_dtype = torch.float32 if z.dtype in (torch.float16, torch.bfloat16) else z.dtype
+    t = (beta_t * z).to(compute_dtype)
+
+    out = (torch.log1p(torch.exp(-torch.abs(t))) + torch.clamp(t, min=0.0)) / float(beta)
+    return out.to(z.dtype)
+
+
+def _safe_clamp(x: torch.Tensor, lo, hi, *, beta: float = 64.0, nan_fill: float = 0.0) -> torch.Tensor:
+    """
+    Smooth clamp approximation using stable softplus, with guards for NaNs/Infs.
+
+      two-sided: y ≈ lo + sp(x-lo) - sp(x-hi)
+      one-sided: y ≈ lo + sp(x-lo)    or    y ≈ x - sp(x-hi)
+
+    Additionally:
+    - NaNs -> nan_fill
+    - For two-sided: +inf -> hi, -inf -> lo  (prevents inf-inf)
+    """
+    x = torch.nan_to_num(x, nan=nan_fill)  # keep +/-inf for now
+
+    lo_t = torch.as_tensor(lo, device=x.device, dtype=x.dtype) if lo is not None else None
+    hi_t = torch.as_tensor(hi, device=x.device, dtype=x.dtype) if hi is not None else None
+
+    if (lo_t is not None) and (hi_t is not None):
+        lo_t, hi_t = torch.minimum(lo_t, hi_t), torch.maximum(lo_t, hi_t)
+
+        # Snap infinities to bounds to avoid inf-inf in the smooth expression.
+        x = torch.where(torch.isposinf(x), hi_t, x)
+        x = torch.where(torch.isneginf(x), lo_t, x)
+
+        # Saturate outside bounds via where; smooth only inside.
+        inside = (x > lo_t) & (x < hi_t)
+        smooth_inside = lo_t + _softplus_stable(x - lo_t, beta=beta) - _softplus_stable(x - hi_t, beta=beta)
+        return torch.where(x <= lo_t, lo_t, torch.where(x >= hi_t, hi_t, torch.where(inside, smooth_inside, x)))
+
+    elif lo_t is not None:
+        # Lower-bound only
+        x = torch.where(torch.isneginf(x), lo_t, x)
+        return torch.where(x <= lo_t, lo_t, lo_t + _softplus_stable(x - lo_t, beta=beta))
+
+    elif hi_t is not None:
+        # Upper-bound only
+        x = torch.where(torch.isposinf(x), hi_t, x)
+        return torch.where(x >= hi_t, hi_t, x - _softplus_stable(x - hi_t, beta=beta))
+
+    else:
+        return x
 
 def _safe_exp(x):
 	# Smoothly limit the exponent's input to avoid overflow/underflow
@@ -150,15 +185,19 @@ def _safe_tan(x):
 	# tan(x) = sin(x)/cos(x), guard cos ~ 0
 	return torch.sin(x)*_safe_recip(torch.cos(x))
 
-def _safe_arcsin(x):
-	return torch.arcsin(_safe_clamp(x, -1.0, 1.0))
+def _safe_arcsin(x: torch.Tensor) -> torch.Tensor:
+    return torch.arcsin(_safe_clamp(x, -1.0, 1.0))
 
-def _safe_arccos(x):
-	return torch.arccos(_safe_clamp(x, -1.0, 1.0))
 
-def _safe_arctanh(x, eps=EPS):
-	# clamp to open interval (-1, 1)
-	return torch.atanh(_safe_clamp(x, -1.0 + eps, 1.0 - eps))
+def _safe_arccos(x: torch.Tensor) -> torch.Tensor:
+    return torch.arccos(_safe_clamp(x, -1.0, 1.0))
+
+def _safe_arctanh(x: torch.Tensor, eps: float = None):
+    # Make eps dtype-aware if not provided (important for fp16/bf16!)
+    if eps is None:
+        # A slightly larger margin than finfo.eps helps for low precision
+        eps = float(8.0 * torch.finfo(x.dtype).eps) if x.is_floating_point() else 1e-6
+    return torch.atanh(_safe_clamp(x, -1.0 + eps, 1.0 - eps))
 
 # ---- your derivative/threshold helpers (assumed pre-defined) ---------------
 # f_inv, f_inv2, f_inv3, f_inv4, f_inv5, f_sqrt, f_power1d5, f_invsqrt, f_exp, f_log, f_tan, f_arcsin, f_arccos, f_arctanh
@@ -175,17 +214,11 @@ SYMBOLIC_LIB = {
 	'x^4':         (lambda x: x**4,        lambda x: x**4,              4, None),
 	'x^5':         (lambda x: x**5,        lambda x: x**5,              5, None),
 
-	# '1/x':   (lambda x: _safe_invpow(x, 1),  lambda x: 1/x,     1, f_inv),
-	# '1/x^2': (lambda x: _safe_invpow(x, 2),  lambda x: 1/x**2,  2, f_inv2),
-	# '1/x^3': (lambda x: _safe_invpow(x, 3),  lambda x: 1/x**3,  3, f_inv3),
-	# '1/x^4': (lambda x: _safe_invpow(x, 4),  lambda x: 1/x**4,  4, f_inv4),
-	# '1/x^5': (lambda x: _safe_invpow(x, 5),  lambda x: 1/x**5,  5, f_inv5),
-
-	'1/x':   (lambda x: _safe_invpow(x, 1),  lambda x: 1/x,     1, None),
-	'1/x^2': (lambda x: _safe_invpow(x, 2),  lambda x: 1/x**2,  2, None),
-	'1/x^3': (lambda x: _safe_invpow(x, 3),  lambda x: 1/x**3,  3, None),
-	'1/x^4': (lambda x: _safe_invpow(x, 4),  lambda x: 1/x**4,  4, None),
-	'1/x^5': (lambda x: _safe_invpow(x, 5),  lambda x: 1/x**5,  5, None),
+	'1/x':   (lambda x: _safe_invpow(x, 1),  lambda x: 1/x,     1, f_inv),
+	'1/x^2': (lambda x: _safe_invpow(x, 2),  lambda x: 1/x**2,  2, f_inv2),
+	'1/x^3': (lambda x: _safe_invpow(x, 3),  lambda x: 1/x**3,  3, f_inv3),
+	'1/x^4': (lambda x: _safe_invpow(x, 4),  lambda x: 1/x**4,  4, f_inv4),
+	'1/x^5': (lambda x: _safe_invpow(x, 5),  lambda x: 1/x**5,  5, f_inv5),
 
 	'sqrt':        (lambda x: _safe_sqrt(x),       lambda x: sympy.sqrt(x),     2, f_sqrt),
 	# 'x^0.5':       (lambda x: _safe_sqrt(x),       lambda x: sympy.sqrt(x),     2, f_sqrt),
