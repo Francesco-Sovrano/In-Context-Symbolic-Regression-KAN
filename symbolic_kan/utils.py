@@ -66,23 +66,23 @@ f_exp = lambda x, y_th: (
 
 
 # ---- helpers ---------------------------------------------------------------
-EPS = 1e-8
+def _eps_like(x, mul=1.0, min_eps=1e-8):
+	if not x.is_floating_point():
+		x = x.float()
+	e = mul * torch.finfo(x.dtype).eps
+	e = max(float(e), float(min_eps))
+	return torch.as_tensor(e, device=x.device, dtype=x.dtype)
 
-def _eps_like(x, mul=1.0):
-	# dtype-aware machine epsilon scaled a bit
-	return torch.tensor(mul * torch.finfo(x.dtype).eps, device=x.device, dtype=x.dtype)
+def _safe_pos(x, eps=None):
+	if eps is None: eps = _eps_like(x, 1024.0)
+	eps = eps.to(x.dtype) if torch.is_tensor(eps) else torch.as_tensor(eps, device=x.device, dtype=x.dtype)
+	# Always >= eps, smooth everywhere
+	return torch.sqrt(x * x + eps * eps)
 
-def _safe_pos(x, eps=None, beta=50.0):
-	"""Smooth floor at eps using softplus; differentiable for all x."""
-	if eps is None: eps = _eps_like(x, 32.0)  # tiny but not too tiny
-	# softplus(x-eps, beta) + eps  ≈  max(x, eps) for large beta
-	return eps + F.softplus(x - eps, beta=beta)
-
-def _safe_log(x, eps=None, beta=50.0):
-	"""log(max(x, eps)) with smooth floor so gradients don’t die."""
-	r = torch.log(_safe_pos(x.abs(), eps=eps, beta=beta))
-	r = _safe_clamp(r, 1e5, -1e5)
-	return r
+def _safe_log(x, eps=None):
+	r = torch.log(_safe_pos(x, eps=eps))
+	r = torch.nan_to_num(r, nan=0.0, posinf=1e5, neginf=-1e5)
+	return _safe_clamp(r, -1e5, 1e5)
 
 def _safe_invpow(x, k, eps=None):
 	"""
@@ -100,104 +100,95 @@ def _safe_invpow(x, k, eps=None):
 	return r
 
 def _safe_recip(x, eps=None):
-	"""Smooth reciprocal: x / (x^2 + eps^2)."""
 	if eps is None: eps = _eps_like(x, 1024.0)
-	r = 1.0 / _safe_pos(x, eps)
-	r = _safe_clamp(r, 1e5, -1e5)
-	return r
+	x = x.to(dtype=torch.float32) if x.dtype in (torch.float16, torch.bfloat16) else x
+	eps = eps.to(x.dtype) if torch.is_tensor(eps) else torch.as_tensor(eps, device=x.device, dtype=x.dtype)
+	r = x / (x * x + eps * eps)
+	return _safe_clamp(r, -1e5, 1e5)
 
 def _safe_sign(x, k=64.0):
 	"""Smooth sign via tanh(kx); k controls sharpness."""
 	return torch.tanh(torch.as_tensor(k, dtype=x.dtype, device=x.device) * x)
 
-def _safe_sqrt(x):
-	return torch.sqrt(_safe_pos(x.abs(), eps=0))
+def _safe_sqrt(x, eps=None):
+	if eps is None: eps = _eps_like(x, 1024.0)
+	return torch.sqrt(_safe_pos(x, eps=eps))  # safe_pos already squares, smooth
 
 def _safe_invsqrt(x):
 	return _safe_recip(_safe_sqrt(x))
 
 def _softplus_stable(z: torch.Tensor, beta: float = 64.0) -> torch.Tensor:
-    """
-    Smooth, numerically stable softplus:
-      softplus(z) = (log1p(exp(-|t|)) + max(t, 0)) / beta   where t = beta*z
-    This avoids overflow because exp(-|t|) is in [0, 1].
-    """
-    beta_t = torch.as_tensor(beta, device=z.device, dtype=z.dtype)
-
-    # Do the softplus math in fp32 for fp16/bf16 to reduce overflow/precision issues.
-    compute_dtype = torch.float32 if z.dtype in (torch.float16, torch.bfloat16) else z.dtype
-    t = (beta_t * z).to(compute_dtype)
-
-    out = (torch.log1p(torch.exp(-torch.abs(t))) + torch.clamp(t, min=0.0)) / float(beta)
-    return out.to(z.dtype)
+	compute_dtype = torch.float32 if z.dtype in (torch.float16, torch.bfloat16) else z.dtype
+	t = (z.to(compute_dtype) * float(beta))
+	out = (torch.log1p(torch.exp(-torch.abs(t))) + torch.clamp(t, min=0.0)) / float(beta)
+	return out.to(z.dtype)
 
 
 def _safe_clamp(x: torch.Tensor, lo, hi, *, beta: float = 64.0, nan_fill: float = 0.0) -> torch.Tensor:
-    """
-    Smooth clamp approximation using stable softplus, with guards for NaNs/Infs.
+	"""
+	Smooth clamp approximation using stable softplus, with guards for NaNs/Infs.
 
-      two-sided: y ≈ lo + sp(x-lo) - sp(x-hi)
-      one-sided: y ≈ lo + sp(x-lo)    or    y ≈ x - sp(x-hi)
+	  two-sided: y ≈ lo + sp(x-lo) - sp(x-hi)
+	  one-sided: y ≈ lo + sp(x-lo)    or    y ≈ x - sp(x-hi)
 
-    Additionally:
-    - NaNs -> nan_fill
-    - For two-sided: +inf -> hi, -inf -> lo  (prevents inf-inf)
-    """
-    x = torch.nan_to_num(x, nan=nan_fill)  # keep +/-inf for now
+	Additionally:
+	- NaNs -> nan_fill
+	- For two-sided: +inf -> hi, -inf -> lo  (prevents inf-inf)
+	"""
+	x = torch.nan_to_num(x, nan=nan_fill)  # keep +/-inf for now
 
-    lo_t = torch.as_tensor(lo, device=x.device, dtype=x.dtype) if lo is not None else None
-    hi_t = torch.as_tensor(hi, device=x.device, dtype=x.dtype) if hi is not None else None
+	lo_t = torch.as_tensor(lo, device=x.device, dtype=x.dtype) if lo is not None else None
+	hi_t = torch.as_tensor(hi, device=x.device, dtype=x.dtype) if hi is not None else None
 
-    if (lo_t is not None) and (hi_t is not None):
-        lo_t, hi_t = torch.minimum(lo_t, hi_t), torch.maximum(lo_t, hi_t)
+	if (lo_t is not None) and (hi_t is not None):
+		lo_t, hi_t = torch.minimum(lo_t, hi_t), torch.maximum(lo_t, hi_t)
 
-        # Snap infinities to bounds to avoid inf-inf in the smooth expression.
-        x = torch.where(torch.isposinf(x), hi_t, x)
-        x = torch.where(torch.isneginf(x), lo_t, x)
+		# Snap infinities to bounds to avoid inf-inf in the smooth expression.
+		x = torch.where(torch.isposinf(x), hi_t, x)
+		x = torch.where(torch.isneginf(x), lo_t, x)
 
-        # Saturate outside bounds via where; smooth only inside.
-        inside = (x > lo_t) & (x < hi_t)
-        smooth_inside = lo_t + _softplus_stable(x - lo_t, beta=beta) - _softplus_stable(x - hi_t, beta=beta)
-        return torch.where(x <= lo_t, lo_t, torch.where(x >= hi_t, hi_t, torch.where(inside, smooth_inside, x)))
+		# Saturate outside bounds via where; smooth only inside.
+		inside = (x > lo_t) & (x < hi_t)
+		smooth_inside = lo_t + _softplus_stable(x - lo_t, beta=beta) - _softplus_stable(x - hi_t, beta=beta)
+		return torch.where(x <= lo_t, lo_t, torch.where(x >= hi_t, hi_t, torch.where(inside, smooth_inside, x)))
 
-    elif lo_t is not None:
-        # Lower-bound only
-        x = torch.where(torch.isneginf(x), lo_t, x)
-        return torch.where(x <= lo_t, lo_t, lo_t + _softplus_stable(x - lo_t, beta=beta))
+	elif lo_t is not None:
+		# Lower-bound only
+		x = torch.where(torch.isneginf(x), lo_t, x)
+		return torch.where(x <= lo_t, lo_t, lo_t + _softplus_stable(x - lo_t, beta=beta))
 
-    elif hi_t is not None:
-        # Upper-bound only
-        x = torch.where(torch.isposinf(x), hi_t, x)
-        return torch.where(x >= hi_t, hi_t, x - _softplus_stable(x - hi_t, beta=beta))
+	elif hi_t is not None:
+		# Upper-bound only
+		x = torch.where(torch.isposinf(x), hi_t, x)
+		return torch.where(x >= hi_t, hi_t, x - _softplus_stable(x - hi_t, beta=beta))
 
-    else:
-        return x
+	else:
+		return x
 
 def _safe_exp(x):
-	# Smoothly limit the exponent's input to avoid overflow/underflow
 	dtype = x.dtype if x.is_floating_point() else torch.float32
-	hi = 88.0 if dtype in (torch.float32, torch.bfloat16) else 700.0
-	lo = -hi
-	x_sc = _safe_clamp(x, lo, hi)
+	finfo = torch.finfo(dtype)
+	hi = math.log(float(finfo.max))
+	# optional: lo = math.log(float(finfo.tiny))  # if you care about underflow
+	x_sc = _safe_clamp(x, -hi, hi)
 	return torch.exp(x_sc)
 
 def _safe_tan(x):
-	# tan(x) = sin(x)/cos(x), guard cos ~ 0
-	return torch.sin(x)*_safe_recip(torch.cos(x))
+	return torch.sin(x) * _safe_recip(torch.cos(x))
 
 def _safe_arcsin(x: torch.Tensor) -> torch.Tensor:
-    return torch.arcsin(_safe_clamp(x, -1.0, 1.0))
+	return torch.arcsin(_safe_clamp(x, -1.0, 1.0))
 
 
 def _safe_arccos(x: torch.Tensor) -> torch.Tensor:
-    return torch.arccos(_safe_clamp(x, -1.0, 1.0))
+	return torch.arccos(_safe_clamp(x, -1.0, 1.0))
 
 def _safe_arctanh(x: torch.Tensor, eps: float = None):
-    # Make eps dtype-aware if not provided (important for fp16/bf16!)
-    if eps is None:
-        # A slightly larger margin than finfo.eps helps for low precision
-        eps = float(8.0 * torch.finfo(x.dtype).eps) if x.is_floating_point() else 1e-6
-    return torch.atanh(_safe_clamp(x, -1.0 + eps, 1.0 - eps))
+	# Make eps dtype-aware if not provided (important for fp16/bf16!)
+	if eps is None:
+		# A slightly larger margin than finfo.eps helps for low precision
+		eps = float(8.0 * torch.finfo(x.dtype).eps) if x.is_floating_point() else 1e-6
+	return torch.atanh(_safe_clamp(x, -1.0 + eps, 1.0 - eps))
 
 # ---- your derivative/threshold helpers (assumed pre-defined) ---------------
 # f_inv, f_inv2, f_inv3, f_inv4, f_inv5, f_sqrt, f_power1d5, f_invsqrt, f_exp, f_log, f_tan, f_arcsin, f_arccos, f_arctanh
