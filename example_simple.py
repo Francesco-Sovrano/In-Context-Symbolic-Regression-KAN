@@ -153,7 +153,7 @@ def get_args():
 	# Training
 	p.add_argument("--lr", type=float, default=1e-2, help="Learning rate.")
 	p.add_argument("--steps", type=int, default=500, help="Steps per fit() call.")
-	p.add_argument("--lamb", type=float, default=3e-3, help="Spline L1 regularization.")
+	p.add_argument("--lamb", type=float, default=1e-3, help="Spline L1 regularization.")
 	p.add_argument(
 		"--gating_entropy",
 		type=float,
