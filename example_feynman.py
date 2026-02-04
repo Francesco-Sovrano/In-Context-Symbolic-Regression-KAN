@@ -69,8 +69,8 @@ def get_args():
 
 	# Repro / data
 	p.add_argument("--seed", type=int, default=0, help="Random seed (default: 0).")
-	p.add_argument("--train_num", type=int, default=2000, help="Training samples.")
-	p.add_argument("--test_num", type=int, default=1000, help="Test samples.")
+	p.add_argument("--train_num", type=int, default=4000, help="Training samples.")
+	p.add_argument("--test_num", type=int, default=2000, help="Test samples.")
 
 	# Model
 	#width 5 10, 20, 50, 100
@@ -97,7 +97,7 @@ def get_args():
 	# Training
 	p.add_argument("--lr", type=float, default=1e-2, help="Learning rate.")
 	p.add_argument("--steps", type=int, default=500, help="Steps per fit() call.")
-	p.add_argument("--lamb", type=float, default=1e-1, help="Spline L1 regularization.")
+	p.add_argument("--lamb", type=float, default=1e-3, help="Spline L1 regularization.")
 	p.add_argument(
 		"--gating_entropy",
 		type=float,
@@ -479,7 +479,7 @@ def main():
 		training_options = dict(
 			lr=args.lr,
 			steps=args.steps,
-			lamb=args.lamb,
+			# lamb=args.lamb,
 			reg_metric=args.reg_metric,
 		)
 
@@ -495,6 +495,7 @@ def main():
 		# 5) Initial training
 		with timed_block("fit_initial", timings, enabled=args.timing):
 			model.fit(dataset, **training_options)
+		training_options['lamb'] = args.lamb
 
 		# 6) Prune + refit rounds
 		if args.prune_iters > 0:
@@ -513,6 +514,10 @@ def main():
 
 				if "atom_names" in kan_kwargs:
 					check_gates(model)
+
+		training_options['lamb'] = 0
+		with timed_block("fit_final", timings, enabled=args.timing):
+			model.fit(dataset, **training_options)
 
 		# 7) Symbolic regression post-pass
 		if "baseline" in args.symbolic_regression_method:
