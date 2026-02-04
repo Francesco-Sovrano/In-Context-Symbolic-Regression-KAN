@@ -85,14 +85,6 @@ def get_args():
 		help="Network width list, e.g. --width 2 5 1",
 	)
 	p.add_argument("--grid", type=int, default=20, help="Spline/basis grid size.")
-	p.add_argument(
-		"--grid_range",
-		nargs=2,
-		type=float,
-		default=[-1.0, 1.0],
-		metavar=("MIN", "MAX"),
-		help="Input range for all variables (default: -1 1).",
-	)
 
 	# Training
 	p.add_argument("--lr", type=float, default=1e-2, help="Learning rate.")
@@ -113,7 +105,7 @@ def get_args():
 	p.add_argument(
 		"--reg_metric",
 		choices=["node_backward", "edge_backward", "edge_forward_spline_u"],
-		default="edge_forward_spline_u",
+		default="edge_backward",
 		help="Regularization metric (avoid edge_forward_spline_n for gated symbolic layers).",
 	)
 
