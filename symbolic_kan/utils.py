@@ -175,11 +175,17 @@ SYMBOLIC_LIB = {
 	'x^4':         (lambda x: x**4,        lambda x: x**4,              4, None),
 	'x^5':         (lambda x: x**5,        lambda x: x**5,              5, None),
 
-	'1/x':   (lambda x: _safe_invpow(x, 1),  lambda x: 1/x,     1, f_inv),
-	'1/x^2': (lambda x: _safe_invpow(x, 2),  lambda x: 1/x**2,  2, f_inv2),
-	'1/x^3': (lambda x: _safe_invpow(x, 3),  lambda x: 1/x**3,  3, f_inv3),
-	'1/x^4': (lambda x: _safe_invpow(x, 4),  lambda x: 1/x**4,  4, f_inv4),
-	'1/x^5': (lambda x: _safe_invpow(x, 5),  lambda x: 1/x**5,  5, f_inv5),
+	# '1/x':   (lambda x: _safe_invpow(x, 1),  lambda x: 1/x,     1, f_inv),
+	# '1/x^2': (lambda x: _safe_invpow(x, 2),  lambda x: 1/x**2,  2, f_inv2),
+	# '1/x^3': (lambda x: _safe_invpow(x, 3),  lambda x: 1/x**3,  3, f_inv3),
+	# '1/x^4': (lambda x: _safe_invpow(x, 4),  lambda x: 1/x**4,  4, f_inv4),
+	# '1/x^5': (lambda x: _safe_invpow(x, 5),  lambda x: 1/x**5,  5, f_inv5),
+
+	'1/x':   (lambda x: _safe_invpow(x, 1),  lambda x: 1/x,     1, None),
+	'1/x^2': (lambda x: _safe_invpow(x, 2),  lambda x: 1/x**2,  2, None),
+	'1/x^3': (lambda x: _safe_invpow(x, 3),  lambda x: 1/x**3,  3, None),
+	'1/x^4': (lambda x: _safe_invpow(x, 4),  lambda x: 1/x**4,  4, None),
+	'1/x^5': (lambda x: _safe_invpow(x, 5),  lambda x: 1/x**5,  5, None),
 
 	'sqrt':        (lambda x: _safe_sqrt(x),       lambda x: sympy.sqrt(x),     2, f_sqrt),
 	# 'x^0.5':       (lambda x: _safe_sqrt(x),       lambda x: sympy.sqrt(x),     2, f_sqrt),
