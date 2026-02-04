@@ -101,6 +101,7 @@ def get_args():
 	p.add_argument("--test_num", type=int, default=1000, help="Test samples.")
 
 	# Model
+	p.add_argument('--top_k_gates', type=int, default=5)
 	p.add_argument(
 		"--width",
 		nargs="+",
@@ -121,17 +122,17 @@ def get_args():
 	# Training
 	p.add_argument("--lr", type=float, default=1e-2, help="Learning rate.")
 	p.add_argument("--steps", type=int, default=500, help="Steps per fit() call.")
-	p.add_argument("--lamb", type=float, default=1e-2, help="Spline L1 regularization.")
+	p.add_argument("--lamb", type=float, default=1e-1, help="Spline L1 regularization.")
 	p.add_argument(
 		"--gating_entropy",
 		type=float,
-		default=1e-3,
+		default=1e-2,
 		help="Entropy regularizer for gate distribution.",
 	)
 	p.add_argument(
 		"--gating_l1",
 		type=float,
-		default=0,
+		default=1e-2,
 		help="L1 regularizer for gating weights/masks.",
 	)
 	p.add_argument(
@@ -155,12 +156,6 @@ def get_args():
 		type=int,
 		default=6,
 		help="Initial top-k gates kept per edge during pruning.",
-	)
-	p.add_argument(
-		"--gate_top_k_min",
-		type=int,
-		default=3,
-		help="Minimum top-k gates kept per edge during pruning.",
 	)
 
 	# Timing
@@ -364,9 +359,9 @@ def main():
 		model.fit(dataset, **training_options)
 
 	# 2) Prune + refit rounds
-	gate_top_k_pruning_delta = (args.gate_top_k_start-args.gate_top_k_min)//args.prune_iters
+	gate_top_k_pruning_delta = (args.gate_top_k_start-args.top_k_gates)//args.prune_iters
 	for i in range(args.prune_iters):
-		top_k = max(args.gate_top_k_min, args.gate_top_k_start - (i+1)*gate_top_k_pruning_delta)
+		top_k = max(args.top_k_gates, args.gate_top_k_start - (i+1)*gate_top_k_pruning_delta)
 
 		with timed_block(f"prune_round_{i}_prune", timings, enabled=args.timing):
 			if use_old_kan_package:
@@ -407,7 +402,7 @@ def main():
 			summary = model.greedy_symbolic_regression(
 				dataset,
 				lib=lib,
-				top_k_gates=3,
+				top_k_gates=args.top_k_gates,
 				**symbolic_training_options,
 			)
 		print("greedy_symbolic_regression:", summary)
