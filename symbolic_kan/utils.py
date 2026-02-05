@@ -82,7 +82,8 @@ def _safe_pos(x, eps=None):
 def _safe_log(x, eps=None):
 	r = torch.log(_safe_pos(x, eps=eps))
 	r = torch.nan_to_num(r, nan=0.0, posinf=1e5, neginf=-1e5)
-	return _safe_clamp(r, -1e5, 1e5)
+	# return _safe_clamp(r, -1e5, 1e5)
+	return r
 
 def _safe_invpow(x, k, eps=None):
 	"""
@@ -96,7 +97,7 @@ def _safe_invpow(x, k, eps=None):
 		r = 1.0 / denom
 	else:
 		r = _safe_sign(x) * (1.0 / denom)
-	r = _safe_clamp(r, 1e5, -1e5)
+	# r = _safe_clamp(r, 1e5, -1e5)
 	return r
 
 def _safe_recip(x, eps=None):
@@ -104,7 +105,8 @@ def _safe_recip(x, eps=None):
 	x = x.to(dtype=torch.float32) if x.dtype in (torch.float16, torch.bfloat16) else x
 	eps = eps.to(x.dtype) if torch.is_tensor(eps) else torch.as_tensor(eps, device=x.device, dtype=x.dtype)
 	r = x / (x * x + eps * eps)
-	return _safe_clamp(r, -1e5, 1e5)
+	# return _safe_clamp(r, -1e5, 1e5)
+	return r
 
 def _safe_sign(x, k=64.0):
 	"""Smooth sign via tanh(kx); k controls sharpness."""
@@ -170,8 +172,8 @@ def _safe_exp(x):
 	finfo = torch.finfo(dtype)
 	hi = math.log(float(finfo.max))
 	# optional: lo = math.log(float(finfo.tiny))  # if you care about underflow
-	x_sc = _safe_clamp(x, -hi, hi)
-	return torch.exp(x_sc)
+	# x = _safe_clamp(x, -hi, hi)
+	return torch.exp(x)
 
 def _safe_tan(x):
 	return torch.sin(x) * _safe_recip(torch.cos(x))
