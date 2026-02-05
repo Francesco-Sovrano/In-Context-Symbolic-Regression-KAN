@@ -137,7 +137,7 @@ def get_args():
 		"--width",
 		nargs="+",
 		type=int,
-		default=[2, 5, 1],
+		default=[2, [5,2], 1],
 		help="Network width list, e.g. --width 2 5 1",
 	)
 	p.add_argument("--grid", type=int, default=20, help="Spline/basis grid size.")
@@ -177,7 +177,7 @@ def get_args():
 	p.add_argument(
 		"--prune_iters",
 		type=int,
-		default=5,
+		default=3,
 		help="How many prune+refit rounds to run (default: 1).",
 	)
 	p.add_argument("--node_th", type=float, default=0.1, help="Node pruning threshold.")
