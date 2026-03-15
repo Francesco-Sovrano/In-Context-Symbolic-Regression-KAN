@@ -1,8 +1,6 @@
-# ablation_ofat_10ds_5methods.py
-#
-# OFAT ablation on first N Feynman datasets, running 5 methods per config.
-#
-# Methods (matching example_feynman.py):
+
+# OFAT ablation on up to N Feynman datasets (random subset), running 5 methods per config.
+# Methods:
 #   baseline
 #   fastkan_baseline
 #   greedy_matching_pursuit
@@ -15,8 +13,9 @@
 #   prune_iters in {1, 3, 5}
 #   seed        in {1, 2, 3}
 #
-# Total configs per dataset = 5 + 4 + 3 + 3 = 15 (OFAT)
-# Total runs per dataset     = 15 * 5 = 75
+# Change requested:
+#   - dataset selection is RANDOM (up to max_datasets).
+#   - controlled by --dataset_select_seed for reproducibility.
 #
 # Example:
 #   python3 ablation_ofat_10ds_5methods.py \
@@ -25,7 +24,8 @@
 #     --equations_csv symbolic_kan/datasets/FeynmanEquations.csv \
 #     --device mps \
 #     --output_csv ablation_ofat_10ds_5methods.csv \
-#     --max_datasets 10
+#     --max_datasets 10 \
+#     --dataset_select_seed 123
 
 import argparse
 import time
@@ -37,7 +37,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from symbolic_kan.MultKAN import KAN, GatedSymbolicLayer
+from symbolic_kan.MultKAN import KAN
 
 try:
     import pandas as pd
@@ -51,7 +51,7 @@ except Exception:
 # -------------------------
 def get_args():
     p = argparse.ArgumentParser(
-        description="OFAT ablation on first N Feynman datasets; run 5 methods per config; save one row per method-run."
+        description="OFAT ablation on up to N random Feynman datasets; run 5 methods per config; save one row per method-run."
     )
 
     # Data
@@ -65,6 +65,9 @@ def get_args():
     p.add_argument("--equations_csv", type=str, default=None)
     p.add_argument("--max_datasets", type=int, default=10)
 
+    # NEW: dataset selection seed (so randomness is reproducible)
+    p.add_argument("--dataset_select_seed", type=int, default=2)
+
     # Sampling
     p.add_argument("--train_num", type=int, default=2000)
     p.add_argument("--test_num", type=int, default=1000)
@@ -77,7 +80,11 @@ def get_args():
     p.add_argument("--grid", type=int, default=20)
     p.add_argument("--lr", type=float, default=1e-2)
     p.add_argument("--steps", type=int, default=200)
-    p.add_argument("--reg_metric", choices=["node_backward", "edge_backward", "edge_forward_spline_u"], default="edge_backward")
+    p.add_argument(
+        "--reg_metric",
+        choices=["node_backward", "edge_backward", "edge_forward_spline_u"],
+        default="edge_backward",
+    )
 
     # Pruning knobs (thresholds fixed; prune_iters varies in OFAT)
     p.add_argument("--node_th", type=float, default=0.1)
@@ -229,7 +236,7 @@ def timed_block(label, timings, enabled=True):
 def safe_predict(model, x: torch.Tensor) -> torch.Tensor:
     model.eval()
     with torch.no_grad():
-        yhat = model.predict(x) if hasattr(model, "predict") else model(x)
+        yhat = model(x)
     if isinstance(yhat, (list, tuple)):
         yhat = yhat[0]
     if yhat.ndim == 1:
@@ -341,7 +348,6 @@ def build_ofat_configs(args):
         c["seed"] = int(s)
         cfgs.append(c)
 
-    # add a stable id for grouping (dataset+config index is ok)
     for idx, c in enumerate(cfgs, start=1):
         c["config_idx"] = idx
 
@@ -391,7 +397,6 @@ def run_one(method: str, ds_name: str, cfg: dict, args, equations_map: dict):
         seed=seed,
     )
 
-    # mirror your method logic:
     if method == "gated_greedy_matching_pursuit":
         kan_kwargs["atom_names"] = lib
     else:
@@ -403,22 +408,24 @@ def run_one(method: str, ds_name: str, cfg: dict, args, equations_map: dict):
     with timed_block("model_init", timings, enabled=args.timing):
         model = KAN(**kan_kwargs)
 
-    # training options (mirror your script: fit_initial without lamb, then prune/refit with lamb)
     training_options = dict(
         optimizer="Adam",
         lr=float(args.lr),
         steps=int(args.steps),
         reg_metric=args.reg_metric,
-        gating_entropy=float(args.gating_entropy),
-        gating_l1=float(args.gating_l1),
     )
+    if method == "gated_greedy_matching_pursuit":
+        training_options["gating_entropy"] = float(args.gating_entropy)
+        training_options["gating_l1"] = float(args.gating_l1)
+    else:
+        training_options["gating_entropy"] = 0.0
+        training_options["gating_l1"] = 0.0
 
     with timed_block("fit_initial", timings, enabled=args.timing):
         model.fit(dataset, **training_options)
 
     training_options["lamb"] = float(cfg["lamb"])
 
-    # prune + refit rounds
     prune_iters = int(cfg["prune_iters"])
     if prune_iters > 0:
         gate_top_k_pruning_delta = (args.gate_top_k_start - args.top_k_gates) // max(1, prune_iters)
@@ -429,17 +436,13 @@ def run_one(method: str, ds_name: str, cfg: dict, args, equations_map: dict):
             with timed_block(f"refit_{i}", timings, enabled=args.timing):
                 model.fit(dataset, **training_options)
 
-    # final fit with lamb=0
     training_options["lamb"] = 0.0
     with timed_block("fit_final", timings, enabled=args.timing):
         model.fit(dataset, **training_options)
 
-    # symbolic regression post-pass
-    pred_formula_str = None
     if method in ("baseline", "fastkan_baseline"):
         with timed_block("symbolic_regression", timings, enabled=args.timing):
             _ = model.baseline_symbolic_regression(lib=lib, weight_simple=0)
-
     elif method in ("greedy_matching_pursuit", "fastkan_greedy_matching_pursuit", "gated_greedy_matching_pursuit"):
         symbolic_training_options = dict(training_options)
         symbolic_training_options["steps"] = 100
@@ -455,17 +458,19 @@ def run_one(method: str, ds_name: str, cfg: dict, args, equations_map: dict):
     else:
         raise ValueError(f"Unknown method: {method}")
 
-    # polish
     with timed_block("fit_final_polish", timings, enabled=args.timing):
         model.fit(dataset, **training_options)
 
     with timed_block("export_formula", timings, enabled=args.timing):
-        symbolic_formula = model.symbolic_formula(simplify=args.simplify)
-        if symbolic_formula:
-            try:
-                pred_formula_str = str(symbolic_formula[0][0])
-            except Exception:
-                pred_formula_str = str(symbolic_formula)
+        pred_formula_str = None
+        try:
+            formula_list, _x0 = model.symbolic_formula(simplify=args.simplify)
+            if isinstance(formula_list, (list, tuple)) and len(formula_list) > 0:
+                pred_formula_str = str(formula_list[0])
+            else:
+                pred_formula_str = str(formula_list)
+        except Exception as e:
+            pred_formula_str = f"<export_failed: {repr(e)}>"
 
     with timed_block("loss_eval", timings, enabled=args.timing):
         train_mse = mse_loss(model, dataset["train_input"], dataset["train_label"])
@@ -480,18 +485,12 @@ def run_one(method: str, ds_name: str, cfg: dict, args, equations_map: dict):
         "filename": feynman_filename,
         "target_formula": target_formula,
         "method": method,
-
-        # OFAT grouping
         "config_idx": int(cfg["config_idx"]),
         "ofat_factor": str(cfg["ofat_factor"]),
-
-        # ablated knobs
         "seed": int(cfg["seed"]),
         "width_mid": str(cfg["width_mid"]),
         "lamb": float(cfg["lamb"]),
         "prune_iters": int(cfg["prune_iters"]),
-
-        # fixed knobs
         "device": args.device,
         "split_strategy": args.split_strategy,
         "grid": int(args.grid),
@@ -501,25 +500,23 @@ def run_one(method: str, ds_name: str, cfg: dict, args, equations_map: dict):
         "node_th": float(args.node_th),
         "edge_th": float(args.edge_th),
         "gate_top_k_start": int(args.gate_top_k_start),
-
-        # gated fixed best (logged always)
         "gating_entropy": float(args.gating_entropy),
         "gating_l1": float(args.gating_l1),
         "top_k_gates": int(args.top_k_gates),
         "regression_policy": str(args.regression_policy),
-
-        # results
         "predicted_formula": pred_formula_str,
         "train_mse": float(train_mse),
         "test_mse": float(test_mse),
-
-        # sizes
         "N_total": dataset.get("N_total"),
         "N_train": dataset.get("N_train"),
         "N_test": dataset.get("N_test"),
-
         "timing_total_wall_s": float(total_wall),
     }
+
+    if args.timing:
+        for k, v in sorted(timings.items()):
+            row[f"timing_{k}_s"] = float(v)
+
     return row
 
 
@@ -537,11 +534,20 @@ def main():
     else:
         print("[WARN] equations_csv not found; target_formula will be empty.")
 
-    dataset_names = list_local_feynman_dataset_names(args.feynman_root, args.feynman_variant)
-    if not dataset_names:
+
+    dataset_names_all = list_local_feynman_dataset_names(args.feynman_root, args.feynman_variant)
+    if not dataset_names_all:
         raise RuntimeError(f"No datasets found in {os.path.join(args.feynman_root, args.feynman_variant)}")
-    dataset_names = dataset_names[: int(args.max_datasets)]
-    print(f"[INFO] Using first {len(dataset_names)} datasets.")
+
+    rng = np.random.RandomState(int(args.dataset_select_seed))
+    rng.shuffle(dataset_names_all)  # in-place random order
+
+    max_ds = int(args.max_datasets)
+    dataset_names = dataset_names_all[:max_ds]
+    print(f"[INFO] Using {len(dataset_names)} RANDOM datasets (seed={args.dataset_select_seed}).")
+    print("[INFO] Selected datasets:")
+    for i, n in enumerate(dataset_names, start=1):
+        print(f"  {i:02d}. {n}")
 
     if (not args.append) and os.path.isfile(args.output_csv):
         os.remove(args.output_csv)
@@ -563,13 +569,14 @@ def main():
 
     for ds in dataset_names:
         for cfg in cfgs:
-            # block of 5 rows: same dataset + same config_idx
             for method in methods:
                 run_idx += 1
                 print("\n" + "=" * 120)
-                print(f"[{run_idx}/{total_runs}] DS={ds} | cfg={cfg['config_idx']:02d} factor={cfg['ofat_factor']}"
-                      f" | seed={cfg['seed']} width={cfg['width_mid']} lamb={cfg['lamb']:.1e} prune={cfg['prune_iters']}"
-                      f" | method={method}")
+                print(
+                    f"[{run_idx}/{total_runs}] DS={ds} | cfg={cfg['config_idx']:02d} factor={cfg['ofat_factor']}"
+                    f" | seed={cfg['seed']} width={cfg['width_mid']} lamb={cfg['lamb']:.1e} prune={cfg['prune_iters']}"
+                    f" | method={method}"
+                )
                 print("=" * 120)
 
                 try:
@@ -585,6 +592,7 @@ def main():
                     fail_row = {
                         "dataset": ds,
                         "filename": _feynman_cli_to_filename(ds),
+                        "target_formula": equations_map.get(_feynman_cli_to_filename(ds), None),
                         "method": method,
                         "config_idx": int(cfg["config_idx"]),
                         "ofat_factor": str(cfg["ofat_factor"]),
