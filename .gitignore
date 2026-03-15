@@ -6,7 +6,6 @@
 cache/*
 model/*
 _backup/*
-primes_function.py
 data/*
 symbolic_kan/datasets/*
 *.gz
