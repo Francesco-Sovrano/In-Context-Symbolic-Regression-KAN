@@ -1,40 +1,41 @@
-# KAN (refactor) — Gated Matching Pursuit + Symbolic Regression
+# KAN (refactor) — Reproducible OFAT Ablation for the Paper: In-Context Symbolic Regression for Robustness-Improved Kolmogorov-Arnold Networks
 
-This repository is a refactor / re-organization of the popular **`pykan`** package (Kolmogorov–Arnold Networks), with a focus on **fast + stable symbolic regression** using:
+This repository contains a refactored / reorganized implementation of **Kolmogorov–Arnold Networks (KANs)** with support for:
 
-- **gated operator layers** (train-time sparsity toward discrete symbolic atoms), and
-- a **Matching-Pursuit-style** greedy symbolic conversion workflow.
+- standard post-hoc symbolic extraction (**AutoSym-style baseline**),
+- **greedy in-context symbolic regression**,
+- **gated operator layers** with greedy refinement,
+- and the **one-factor-at-a-time (OFAT) robustness pipeline** used in the paper.
 
-It implements the methods described in *“Fast Stable Symbolic Regression in KANs via Gated Matching Pursuit”* (see the paper for conceptual details).
+The main script used to reproduce the paper runs is:
 
----
+- **`ablation.py`**
 
-## Repository layout
-
-- `symbolic_kan/` — the library code:
-  - `MultKAN` / `KAN` (KAN is an alias for MultKAN)
-  - gated symbolic layers (`GatedSymbolicLayer`)
-  - symbolic regression utilities (`baseline_symbolic_regression`, `greedy_symbolic_regression`, etc.)
-  - the operator library registry (`SYMBOLIC_LIB`) and helpers (`add_symbolic`, safe ops, dataset utils)
-
-- `example_simple.py` — end-to-end demo:
-  - build a toy dataset for `f(x, y) = exp(sin(pi*x) + y^2)`
-  - train + prune a KAN
-  - run one of the supported symbolic regression modes
-  - print the final symbolic formula
-
-- `example_logical_features.py` — custom symbolic primitives demo:
-  - shows how to register **new symbolic functions** (e.g. step / smooth sign / smooth ReLU)
-  - uses `add_symbolic(...)` to extend the operator library used by symbolic regression / gated layers
-
-- `model/` — **auto-generated checkpoints** (created by default by `MultKAN` when training).  
-  You can delete it safely; see “Checkpointing” below.
+This script runs the five pipelines compared in the paper over multiple Feynman datasets and OFAT configurations, and writes one row per method-run to a CSV file.
 
 ---
 
-## Setup
+## What this repository contains
 
-### 1) Create an environment (recommended)
+- `symbolic_kan/` — core library code
+  - `MultKAN` / `KAN`
+  - symbolic regression utilities
+  - gated symbolic layers
+  - operator library and helpers
+
+- `ablation.py` — **paper pipeline**
+  - runs the OFAT ablation on up to `N` randomly selected Feynman datasets
+  - evaluates all five methods for each configuration
+  - saves raw run results to CSV
+
+- `example_simple.py` — small end-to-end demo
+- `example_logical_features.py` — demo for custom symbolic primitives
+
+---
+
+## Environment setup
+
+### 1) Create and activate a virtual environment
 
 ```bash
 python -m venv .venv
@@ -49,175 +50,313 @@ pip install -U pip
 pip install -r requirements.txt
 ```
 
-Notes:
+### Notes
 
-- `torch` may require a platform-specific install (CPU/CUDA). If `pip install torch` installs the wrong build, install PyTorch via the official instructions for your platform, then re-run `pip install -r requirements.txt`.
-- `requirements.txt` includes **`pykan`**. The current `example_simple.py` imports `kan.*` (from `pykan`) for optional comparisons, so you either need `pykan` installed **or** you can remove that import if you don’t use the legacy path.
+- `torch` may require a platform-specific installation (CPU / CUDA / Apple Silicon). If needed, install the correct PyTorch build first using the official PyTorch instructions, then run `pip install -r requirements.txt`.
+- The paper pipeline uses the local `symbolic_kan` package directly.
+- Run all commands from the **repository root**.
 
 ---
 
-## Run `example_simple.py`
+## Dataset layout
 
-From the repository root, you **must** pick a symbolic regression mode via `--symbolic_regression_method` (required).
+The paper pipeline expects local Feynman datasets (available at https://space.mit.edu/home/tegmark/aifeynman.html) under:
 
-### Quick start (copy/paste)
+```text
+symbolic_kan/datasets/
+```
+
+with a variant subdirectory such as:
+
+```text
+symbolic_kan/datasets/Feynman_with_units/
+```
+
+and, optionally, the equation metadata file:
+
+```text
+symbolic_kan/datasets/FeynmanEquations.csv
+```
+
+If `--equations_csv` is not passed explicitly, `ablation.py` will look for `symbolic_kan/datasets/FeynmanEquations.csv` automatically.
+
+---
+
+## Main paper pipeline: `ablation.py`
+
+The script evaluates the following five methods:
+
+1. `baseline`
+2. `fastkan_baseline`
+3. `greedy_matching_pursuit`
+4. `fastkan_greedy_matching_pursuit`
+5. `gated_greedy_matching_pursuit`
+
+### OFAT factors
+
+The script varies one factor at a time around a fixed reference configuration:
+
+- `width_mid ∈ {5,2; 10,2; 20,2; 50,2; 100,2}`
+- `lamb ∈ {1e-4, 1e-3, 1e-2, 1e-1}`
+- `prune_iters ∈ {1, 3, 5}`
+- `seed ∈ {1, 2, 3}`
+
+### Reference configuration
+
+By default, the reference configuration is:
+
+- `width_mid = 5,2`
+- `lamb = 1e-2`
+- `prune_iters = 3`
+- `seed = 1`
+
+This yields:
+
+- **15 OFAT configurations per dataset**
+- **5 methods per configuration**
+- therefore **75 runs per dataset**
+
+If `--max_datasets 10` is used, the full run produces:
+
+- **750 runs total**
+
+---
+
+## Important reproducibility details
+
+### Random dataset selection
+
+The datasets are **not selected alphabetically**. The script:
+
+1. lists all datasets in the chosen Feynman variant,
+2. shuffles them with `--dataset_select_seed`,
+3. takes the first `--max_datasets` datasets.
+
+This means dataset selection is:
+
+- **random**
+- **without replacement**
+- **fully reproducible** if `--dataset_select_seed` is fixed.
+
+### Per-run randomness
+
+The OFAT `seed` factor controls:
+
+- model initialization,
+- NumPy random state,
+- and, when `--split_strategy random` is used, the train/test split.
+
+So reproducibility requires fixing both:
+
+- the dataset-selection seed: `--dataset_select_seed`
+- the OFAT seed grid: `--seed_grid`
+
+---
+
+## Output format
+
+The script writes **one CSV row per method-run**.
+
+Each row includes, among other fields:
+
+- dataset name
+- method name
+- OFAT factor
+- seed
+- `width_mid`
+- `lamb`
+- `prune_iters`
+- train MSE
+- test MSE
+- predicted symbolic formula
+- timing information (if enabled)
+
+If a run fails, the script still appends a row containing the configuration and an `error` field. This is important for transparent reporting of unavailable runs.
+
+---
+
+## Key command-line arguments
+
+### Data and dataset selection
+
+- `--feynman_root` — root dataset directory
+- `--feynman_variant` — dataset variant, e.g. `Feynman_with_units`
+- `--equations_csv` — optional equation metadata CSV
+- `--max_datasets` — how many datasets to use
+- `--dataset_select_seed` — random seed controlling dataset subset selection
+
+### Sampling
+
+- `--train_num` — max number of training samples per dataset
+- `--test_num` — max number of test samples per dataset
+- `--split_strategy` — `random` or `linspace`
+
+### Device
+
+- `--device` — `cpu`, `cuda`, or `mps`
+
+### Reference configuration
+
+- `--baseline_width_mid`
+- `--baseline_lamb`
+- `--baseline_prune_iters`
+- `--baseline_seed`
+
+### OFAT grids
+
+- `--width_mid_grid`
+- `--lamb_grid`
+- `--prune_iters_grid`
+- `--seed_grid`
+
+### Training
+
+- `--grid`
+- `--lr`
+- `--steps`
+- `--reg_metric`
+- `--node_th`
+- `--edge_th`
+
+### Gated method
+
+- `--gating_entropy`
+- `--gating_l1`
+- `--top_k_gates`
+- `--gate_top_k_start`
+- `--regression_policy`
+
+### Output
+
+- `--output_csv`
+- `--append / --no-append`
+- `--timing / --no-timing`
+- `--simplify / --no-simplify`
+
+---
+
+## Reproducing the paper run
+
+To make runs reproducible, keep the following fixed:
+
+1. the code version / commit,
+2. the Python environment,
+3. the dataset files,
+4. `--dataset_select_seed`,
+5. all OFAT grids,
+6. the device type,
+7. the output of failed runs as well as successful runs.
+
+To reproduce exactly the paper results, run:
 
 ```bash
-# 1) Baseline: post-hoc symbolic fitting
-python example_simple.py --symbolic_regression_method baseline
-
-# 2) FastKAN baseline: same as baseline, but with lighter numeric atoms during training
-python example_simple.py --symbolic_regression_method fastkan_baseline
-
-# 3) Greedy matching pursuit: post-hoc greedy symbolic selection
-python example_simple.py --symbolic_regression_method greedy_matching_pursuit --simplify
-
-# 4) FastKAN + greedy matching pursuit: greedy selection + lighter numeric atoms
-python example_simple.py --symbolic_regression_method fastkan_greedy_matching_pursuit --simplify
-
-# 5) Gated + greedy matching pursuit: train with gated symbolic atoms, then greedy selection
-python example_simple.py --symbolic_regression_method gated_greedy_matching_pursuit --simplify
+python ablation.py \
+  --feynman_root symbolic_kan/datasets \
+  --feynman_variant Feynman_with_units \
+  --equations_csv symbolic_kan/datasets/FeynmanEquations.csv \
+  --device mps \
+  --output_csv results/ablation_ofat_paper10.csv \
+  --datasets \
+    feynman_I_9_18 \
+    feynman_I_10_7 \
+    feynman_I_12_1 \
+    feynman_I_12_4 \
+    feynman_I_13_4 \
+    feynman_I_34_1 \
+    feynman_II_6_15a \
+    feynman_II_6_15b \
+    feynman_II_21_32 \
+    feynman_II_34_29a
+  --append
 ```
 
-### What each `--symbolic_regression_method` does
-
-- `baseline`  
-  - Train/prune a **standard KAN** (default numeric atoms: `bspline`).  
-  - Run `baseline_symbolic_regression(lib=...)`.  
-  - **No gated symbolic layers**; no per-edge gate/atom diagnostics.
-
-- `fastkan_baseline`  
-  - Same as `baseline`, but swaps numeric atoms from `bspline` to **FastKAN-style** `radial_bf` via `numeric_atom_configs`.  
-  - Intended to reduce per-step compute while keeping the same post-hoc symbolic regression.
-
-- `greedy_matching_pursuit`  
-  - Train/prune a **standard KAN**.  
-  - Run `greedy_symbolic_regression(dataset, lib=...)` (matching-pursuit style greedy selection).  
-  - Still **no gated symbolic layers** in the model (`atom_names` is not set).
-
-- `fastkan_greedy_matching_pursuit`  
-  - Same as `greedy_matching_pursuit`, but uses FastKAN-style numeric atoms (`radial_bf`) instead of `bspline`.
-
-- `gated_greedy_matching_pursuit`  
-  - Construct KAN with **gated symbolic layers** by passing `atom_names=lib`.  
-  - Train/prune **with gates**, then run `greedy_symbolic_regression(dataset, lib=...)`.  
-  - Enables gate-based inspectability (`check_gates`, `get_symbolic_choice_per_edge`) and `gate_top_k` pruning.
-
-> Note: the script selects behavior by substring checks (e.g., `"fastkan"` / `"gated"`), so the `fastkan_*` methods share the same symbolic-regression routine as their non-fastkan counterparts; only the **numeric atom configuration** changes.
-
-### What you’ll see
-
-- dataset tensor shapes
-- training / pruning logs
-- a summary from the selected symbolic regression routine
-- the final exported formula from `model.symbolic_formula(...)`
-
-### Useful knobs (common)
-
-- `--width 2 5 1` : network width (list)
-- `--grid 20` and `--grid_range -1 1` : basis grid and input range
-- `--steps 500`, `--lr 1e-2`, `--lamb 1e-2` : training hyperparameters
-- `--prune_iters 1`, `--node_th 0.1`, `--edge_th 0.0` : pruning controls
-- `--simplify / --no-simplify` : simplify the exported SymPy expression
-- gated mode only: `--gating_entropy`, `--gating_l1`, `--gate_top_k_start`, `--gate_top_k_min`
-
----
-
-## Checkpointing (`./model/`)
-
-`MultKAN` defaults to `auto_save=True` and `ckpt_path="./model"`, so training will create checkpoint files under `./model/` automatically.
-
-If you don’t want checkpoints, set `auto_save=False` when constructing the model, or change `ckpt_path`:
-
-```python
-from symbolic_kan.MultKAN import KAN
-
-model = KAN(
-    width=[2, 5, 1],
-    grid=20,
-    grid_range=[-1, 1],
-    auto_save=False,          # disable
-    # ckpt_path="./my_ckpts", # or redirect
-)
-```
-
----
-
-## Extending the symbolic operator library with `add_symbolic`
-
-The symbolic regression code and gated symbolic layers both rely on a global registry `SYMBOLIC_LIB` (in `symbolic_kan/utils.py`).
-To add your own primitive so it can be referenced by name in `lib=[...]` / `atom_names=[...]`, use:
-
-```python
-from symbolic_kan.utils import add_symbolic
-import sympy as sp
-import torch
-
-# Example: a smooth step gate (useful as a differentiable “if” primitive)
-def smooth_step(z, k=20.0):
-    return torch.sigmoid(k * z)
-
-add_symbolic(
-    name="step",
-    fun=lambda z: smooth_step(z),                 # torch implementation (Tensor -> Tensor)
-    c=1,                                          # optional complexity cost
-    sympy_fun=lambda z: sp.Function("step")(z),   # how it should appear in SymPy output
-)
-```
-
-After registering, you can use the new primitive by name:
-
-```python
-lib = ["0", "x", "x^2", "abs", "step"]  # "step" is now valid
-```
-
-### Using custom primitives in practice
-
-**A) Post-hoc symbolic regression** (no gated layers):
-
-```python
-summary = model.greedy_symbolic_regression(dataset, lib=lib, top_k_gates=3, steps=100, lr=1e-2)
-formula = model.symbolic_formula(simplify=True)
-```
-
-**B) Train-time gated symbolic selection** (gated layers enabled):
-
-```python
-from symbolic_kan.MultKAN import KAN
-
-model = KAN(
-    width=[2, 5, 1],
-    grid=20,
-    grid_range=[-1, 1],
-    atom_names=lib,   # <-- enables gated symbolic layers over your (extended) library
-)
-```
-
-### See a full working example
-
-`example_logical_features.py` demonstrates this pattern end-to-end by registering logical / piecewise-style primitives:
-
-- `step` (smooth gate)
-- `relu` (smooth hinge)
-- `sgn_smooth` (smooth sign)
-
-…and then using them in `safe_lib = [...]` passed into `greedy_symbolic_regression(...)`.
-
-Run it from the repo root:
+For CPU, replace:
 
 ```bash
-python example_logical_features.py --simplify
+--device mps
 ```
+
+with:
+
+```bash
+--device cpu
+```
+
+For CUDA, replace it with:
+
+```bash
+--device cuda
+```
+
+If you want a random but reproducible subset instead of an explicit list:
+
+```bash
+python ablation.py \
+  --feynman_root symbolic_kan/datasets \
+  --feynman_variant Feynman_with_units \
+  --equations_csv symbolic_kan/datasets/FeynmanEquations.csv \
+  --device mps \
+  --output_csv results/ablation_random_10ds.csv \
+  --max_datasets 10 \
+  --dataset_select_seed 123 \
+  --append
+```
+
+---
+
+## Notes on interpretation
+
+The CSV generated by `ablation.py` contains the raw runs used for the paper analysis.
+
+In the paper:
+
+- **seed sensitivity** is computed from the rows where `ofat_factor = seed`, using the fixed reference configuration,
+- **OFAT sensitivity** is computed by aggregating rows where `ofat_factor ∈ {width_mid, lamb, prune_iters}`.
+
+These are different summaries and should not be interpreted as the same quantity.
 
 ---
 
 ## Troubleshooting
 
-- **`ModuleNotFoundError: No module named 'kan'`**  
-  Install `pykan` (included in `requirements.txt`) or remove the unconditional `from kan.MultKAN import ...` import from `example_simple.py`.
+### No datasets found
 
-- **Slow training**  
-  Reduce `--steps`, reduce `--grid`, reduce hidden width, or prune more aggressively (especially in gated mode with `--gate_top_k_*`).
+Check that the selected variant exists, for example:
 
-- **Messy / unstable formulas**  
-  Increase sparsity pressure (`--gating_entropy`, `--gating_l1`), prune earlier/more, or restrict `lib` to a smaller operator set.
+```text
+symbolic_kan/datasets/Feynman_with_units/
+```
+
+### Wrong Torch build
+
+Install the correct PyTorch wheel for your platform first, then reinstall the remaining requirements.
+
+### Long runtime
+
+This pipeline is intentionally large. To reduce runtime for quick tests:
+
+- lower `--max_datasets`
+- reduce `--steps`
+- use fewer OFAT values
+- run on `cuda` or `mps` if available
+
+### Interrupted runs
+
+The script appends rows progressively. If interrupted, previously completed runs remain stored in the CSV.
+
+---
+
+## Optional demos
+
+These are not part of the paper pipeline, but remain useful for quick sanity checks:
+
+```bash
+python example_simple.py
+python example_logical_features.py --simplify
+```
+
+---
+
+## Citation / paper context
+
+This codebase supports the experiments reported in the KAN symbolic regression paper, including the robustness analysis based on OFAT sweeps and seed sensitivity.

@@ -62,6 +62,13 @@ def get_args():
         default="Feynman_with_units",
         choices=["Feynman_without_units", "Feynman_with_units", "bonus_without_units", "bonus_with_units"],
     )
+
+    p.add_argument(
+    "--datasets",
+    nargs="+",
+    default=None,
+    help="Optional explicit dataset names to run, e.g. feynman_I_10_7",
+    )
     p.add_argument("--equations_csv", type=str, default=None)
     p.add_argument("--max_datasets", type=int, default=10)
 
@@ -535,19 +542,39 @@ def main():
         print("[WARN] equations_csv not found; target_formula will be empty.")
 
 
+    # dataset_names_all = list_local_feynman_dataset_names(args.feynman_root, args.feynman_variant)
+    # if not dataset_names_all:
+    #     raise RuntimeError(f"No datasets found in {os.path.join(args.feynman_root, args.feynman_variant)}")
+
+    # rng = np.random.RandomState(int(args.dataset_select_seed))
+    # rng.shuffle(dataset_names_all)  # in-place random order
+
+    # max_ds = int(args.max_datasets)
+    # dataset_names = dataset_names_all[:max_ds]
+    # print(f"[INFO] Using {len(dataset_names)} RANDOM datasets (seed={args.dataset_select_seed}).")
+    # print("[INFO] Selected datasets:")
+    # for i, n in enumerate(dataset_names, start=1):
+    #     print(f"  {i:02d}. {n}")
+
     dataset_names_all = list_local_feynman_dataset_names(args.feynman_root, args.feynman_variant)
     if not dataset_names_all:
         raise RuntimeError(f"No datasets found in {os.path.join(args.feynman_root, args.feynman_variant)}")
 
-    rng = np.random.RandomState(int(args.dataset_select_seed))
-    rng.shuffle(dataset_names_all)  # in-place random order
-
-    max_ds = int(args.max_datasets)
-    dataset_names = dataset_names_all[:max_ds]
-    print(f"[INFO] Using {len(dataset_names)} RANDOM datasets (seed={args.dataset_select_seed}).")
-    print("[INFO] Selected datasets:")
-    for i, n in enumerate(dataset_names, start=1):
-        print(f"  {i:02d}. {n}")
+    if args.datasets is not None:
+        missing = [d for d in args.datasets if d not in dataset_names_all]
+        if missing:
+            raise ValueError(f"Requested dataset(s) not found: {missing}")
+        dataset_names = args.datasets
+        print(f"[INFO] Using explicitly requested dataset(s): {dataset_names}")
+    else:
+        rng = np.random.RandomState(int(args.dataset_select_seed))
+        rng.shuffle(dataset_names_all)
+        max_ds = int(args.max_datasets)
+        dataset_names = dataset_names_all[:max_ds]
+        print(f"[INFO] Using {len(dataset_names)} RANDOM datasets (seed={args.dataset_select_seed}).")
+        print("[INFO] Selected datasets:")
+        for i, n in enumerate(dataset_names, start=1):
+            print(f"  {i:02d}. {n}")
 
     if (not args.append) and os.path.isfile(args.output_csv):
         os.remove(args.output_csv)
