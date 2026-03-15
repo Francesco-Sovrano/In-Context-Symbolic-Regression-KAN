@@ -64,33 +64,41 @@ pip install -r requirements.txt
 
 ## Getting the Feynman data
 
-The repository **does not bundle the Feynman benchmark files**. To reproduce the paper runs, download them separately (available at [https://space.mit.edu/home/tegmark/aifeynman.html](https://space.mit.edu/home/tegmark/aifeynman.html)) and place them under `symbolic_kan/datasets/`.
+The repository **does not bundle the Feynman benchmark files**. The paper pipeline expects local Feynman datasets (available at [https://space.mit.edu/home/tegmark/aifeynman.html](https://space.mit.edu/home/tegmark/aifeynman.html)) under:
 
-The official AI Feynman repository and documentation both point users to the **Feynman Symbolic Regression Database** for benchmark data. The database is hosted on Max Tegmark's MIT page.
+```text
+symbolic_kan/datasets/
+```
 
-### What you need
+with a variant subdirectory such as:
 
-At minimum, download:
+```text
+symbolic_kan/datasets/Feynman_with_units/
+```
 
-- the **`Feynman_with_units/`** dataset directory
-- **`FeynmanEquations.csv`**
+and, optionally, the equation metadata file:
+
+```text
+symbolic_kan/datasets/FeynmanEquations.csv
+```
+
+If `--equations_csv` is not passed explicitly, `ablation.py` will look for `symbolic_kan/datasets/FeynmanEquations.csv` automatically.
 
 ### How to find and download `Feynman_with_units`
 
-1. Open the official AI Feynman repository or documentation page: [https://space.mit.edu/home/tegmark/aifeynman.html](https://space.mit.edu/home/tegmark/aifeynman.html).
+1. Open the AI Feynman data page: [https://space.mit.edu/home/tegmark/aifeynman.html](https://space.mit.edu/home/tegmark/aifeynman.html).
 2. Follow the link to the **Feynman Symbolic Regression Database**.
-3. Download the benchmark dataset archive from that page.
+3. Download the dataset archive that contains the benchmark files.
 4. Extract the archive locally.
-5. Inside the extracted contents, locate:
-   - `Feynman_with_units/`
-   - `FeynmanEquations.csv`
-6. Create the local dataset directory expected by this repository:
+5. Locate the variant directory `Feynman_with_units/` inside the extracted files.
+6. Optionally locate `FeynmanEquations.csv` if you want to pass it explicitly or keep the default metadata file in place.
+7. Create the local dataset directory expected by this repository:
 
 ```bash
 mkdir -p symbolic_kan/datasets
 ```
 
-7. Copy the downloaded files into that directory so the layout becomes:
+8. Copy the downloaded files so the local layout becomes:
 
 ```text
 symbolic_kan/datasets/
@@ -104,13 +112,13 @@ symbolic_kan/datasets/
 
 ### Quick verification
 
-Check that the dataset is visible from the repository root:
+From the repository root, check that the variant directory is visible:
 
 ```bash
 ls symbolic_kan/datasets/Feynman_with_units | head
 ```
 
-You should see filenames such as `I.10.7`, `I.12.1`, and similar equation identifiers.
+You should see equation identifiers such as `I.10.7`, `I.12.1`, and similar filenames.
 
 ### Optional variants
 
@@ -119,12 +127,6 @@ You should see filenames such as `I.10.7`, `I.12.1`, and similar equation identi
 - `Feynman_without_units`
 - `bonus_with_units`
 - `bonus_without_units`
-
-If `--equations_csv` is not passed explicitly, `ablation.py` looks for:
-
-```text
-symbolic_kan/datasets/FeynmanEquations.csv
-```
 
 ---
 
