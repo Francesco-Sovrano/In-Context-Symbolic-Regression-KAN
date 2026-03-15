@@ -1,35 +1,39 @@
-# KAN (refactor) — Reproducible OFAT Ablation for the Paper: In-Context Symbolic Regression for Robustness-Improved Kolmogorov-Arnold Networks
+# In-Context Symbolic Regression for Robustness-Improved Kolmogorov-Arnold Networks
 
-This repository contains a refactored / reorganized implementation of **Kolmogorov–Arnold Networks (KANs)** with support for:
+This repository is the replication package for the paper **"In-Context Symbolic Regression for Robustness-Improved Kolmogorov-Arnold Networks"**.
 
-- standard post-hoc symbolic extraction (**AutoSym-style baseline**),
-- **greedy in-context symbolic regression**,
-- **gated operator layers** with greedy refinement,
-- and the **one-factor-at-a-time (OFAT) robustness pipeline** used in the paper.
+It contains:
 
-The main script used to reproduce the paper runs is:
+- a refactored KAN implementation in `symbolic_kan/`
+- the main experimental driver used for the paper, `ablation.py`
+- lightweight examples for sanity checks and smaller runs
+
+The main entry point for reproducing the paper experiments is:
 
 - **`ablation.py`**
 
-This script runs the five pipelines compared in the paper over multiple Feynman datasets and OFAT configurations, and writes one row per method-run to a CSV file.
+`ablation.py` evaluates five symbolic-regression pipelines on selected Feynman datasets and writes one CSV row per method/configuration run.
 
 ---
 
-## What this repository contains
+## Repository layout
 
-- `symbolic_kan/` — core library code
-  - `MultKAN` / `KAN`
-  - symbolic regression utilities
-  - gated symbolic layers
-  - operator library and helpers
+```text
+.
+├── ablation.py
+├── example_feynman.py
+├── example_simple.py
+├── requirements.txt
+└── symbolic_kan/
+```
 
-- `ablation.py` — **paper pipeline**
-  - runs the OFAT ablation on up to `N` randomly selected Feynman datasets
-  - evaluates all five methods for each configuration
-  - saves raw run results to CSV
+### Main files
 
-- `example_simple.py` — small end-to-end demo
-- `example_logical_features.py` — demo for custom symbolic primitives
+- `symbolic_kan/` — core KAN implementation and symbolic-regression utilities
+- `ablation.py` — main paper pipeline for the OFAT robustness study
+- `example_feynman.py` — example run on a local Feynman dataset
+- `example_simple.py` — small synthetic end-to-end demo
+- `requirements.txt` — Python dependencies
 
 ---
 
@@ -52,39 +56,104 @@ pip install -r requirements.txt
 
 ### Notes
 
-- `torch` may require a platform-specific installation (CPU / CUDA / Apple Silicon). If needed, install the correct PyTorch build first using the official PyTorch instructions, then run `pip install -r requirements.txt`.
-- The paper pipeline uses the local `symbolic_kan` package directly.
-- Run all commands from the **repository root**.
+- `torch` may require a platform-specific install for CPU, CUDA, or Apple Silicon. If needed, install the correct PyTorch build first, then run `pip install -r requirements.txt`.
+- Run all commands from the repository root.
+- The paper experiments use the local `symbolic_kan` package directly.
 
 ---
 
-## Dataset layout
+## Getting the Feynman data
 
-The paper pipeline expects local Feynman datasets (available at https://space.mit.edu/home/tegmark/aifeynman.html) under:
+The repository **does not bundle the Feynman benchmark files**. To reproduce the paper runs, download them separately (available at [https://space.mit.edu/home/tegmark/aifeynman.html](https://space.mit.edu/home/tegmark/aifeynman.html)) and place them under `symbolic_kan/datasets/`.
+
+The official AI Feynman repository and documentation both point users to the **Feynman Symbolic Regression Database** for benchmark data. The database is hosted on Max Tegmark's MIT page.
+
+### What you need
+
+At minimum, download:
+
+- the **`Feynman_with_units/`** dataset directory
+- **`FeynmanEquations.csv`**
+
+### How to find and download `Feynman_with_units`
+
+1. Open the official AI Feynman repository or documentation page: [https://space.mit.edu/home/tegmark/aifeynman.html](https://space.mit.edu/home/tegmark/aifeynman.html).
+2. Follow the link to the **Feynman Symbolic Regression Database**.
+3. Download the benchmark dataset archive from that page.
+4. Extract the archive locally.
+5. Inside the extracted contents, locate:
+   - `Feynman_with_units/`
+   - `FeynmanEquations.csv`
+6. Create the local dataset directory expected by this repository:
+
+```bash
+mkdir -p symbolic_kan/datasets
+```
+
+7. Copy the downloaded files into that directory so the layout becomes:
 
 ```text
 symbolic_kan/datasets/
+├── FeynmanEquations.csv
+└── Feynman_with_units/
+    ├── I.10.7
+    ├── I.12.1
+    ├── I.12.4
+    └── ...
 ```
 
-with a variant subdirectory such as:
+### Quick verification
 
-```text
-symbolic_kan/datasets/Feynman_with_units/
+Check that the dataset is visible from the repository root:
+
+```bash
+ls symbolic_kan/datasets/Feynman_with_units | head
 ```
 
-and, optionally, the equation metadata file:
+You should see filenames such as `I.10.7`, `I.12.1`, and similar equation identifiers.
+
+### Optional variants
+
+`ablation.py` also supports these variants if you have downloaded them:
+
+- `Feynman_without_units`
+- `bonus_with_units`
+- `bonus_without_units`
+
+If `--equations_csv` is not passed explicitly, `ablation.py` looks for:
 
 ```text
 symbolic_kan/datasets/FeynmanEquations.csv
 ```
 
-If `--equations_csv` is not passed explicitly, `ablation.py` will look for `symbolic_kan/datasets/FeynmanEquations.csv` automatically.
+---
+
+## Quick sanity checks
+
+### Synthetic example
+
+```bash
+python example_simple.py --symbolic_regression_method gated_greedy_matching_pursuit
+```
+
+### Feynman example
+
+After downloading the dataset, you can run a single Feynman problem with:
+
+```bash
+python example_feynman.py \
+  --symbolic_regression_method gated_greedy_matching_pursuit \
+  --feynman_name I.26.2 \
+  --feynman_root symbolic_kan/datasets \
+  --feynman_variant Feynman_with_units \
+  --device cpu
+```
 
 ---
 
 ## Main paper pipeline: `ablation.py`
 
-The script evaluates the following five methods:
+The script compares five methods:
 
 1. `baseline`
 2. `fastkan_baseline`
@@ -94,7 +163,7 @@ The script evaluates the following five methods:
 
 ### OFAT factors
 
-The script varies one factor at a time around a fixed reference configuration:
+The one-factor-at-a-time (OFAT) sweep varies one factor around a fixed reference configuration:
 
 - `width_mid ∈ {5,2; 10,2; 20,2; 50,2; 100,2}`
 - `lamb ∈ {1e-4, 1e-3, 1e-2, 1e-1}`
@@ -110,56 +179,111 @@ By default, the reference configuration is:
 - `prune_iters = 3`
 - `seed = 1`
 
-This yields:
+This produces:
 
 - **15 OFAT configurations per dataset**
 - **5 methods per configuration**
 - therefore **75 runs per dataset**
 
-If `--max_datasets 10` is used, the full run produces:
+With `--max_datasets 10`, the full study produces **750 runs**.
 
-- **750 runs total**
+---
+
+## Reproducing the paper run
+
+To reproduce the paper tables and figures as closely as possible, keep the following fixed:
+
+1. code version / commit
+2. Python environment
+3. downloaded dataset files
+4. dataset selection or explicit dataset list
+5. OFAT grids
+6. device type
+7. failed runs as well as successful runs
+
+### Exact dataset list used in the paper run
+
+```bash
+python ablation.py \
+  --feynman_root symbolic_kan/datasets \
+  --feynman_variant Feynman_with_units \
+  --equations_csv symbolic_kan/datasets/FeynmanEquations.csv \
+  --device cpu \
+  --output_csv results/ablation_ofat_paper10.csv \
+  --datasets \
+    feynman_I_9_18 \
+    feynman_I_10_7 \
+    feynman_I_12_1 \
+    feynman_I_12_4 \
+    feynman_I_13_4 \
+    feynman_I_34_1 \
+    feynman_II_6_15a \
+    feynman_II_6_15b \
+    feynman_II_21_32 \
+    feynman_II_34_29a 
+```
+
+Replace `--device cpu` with `--device cuda` or `--device mps` if appropriate for your machine.
+
+### Reproducible random subset
+
+If you want a random but reproducible subset instead of the fixed list above:
+
+```bash
+python ablation.py \
+  --feynman_root symbolic_kan/datasets \
+  --feynman_variant Feynman_with_units \
+  --equations_csv symbolic_kan/datasets/FeynmanEquations.csv \
+  --device cpu \
+  --output_csv results/ablation_random_10ds.csv \
+  --max_datasets 10 \
+  --dataset_select_seed 123 
+```
+
+Dataset selection is:
+
+- random
+- without replacement
+- reproducible when `--dataset_select_seed` is fixed
 
 ---
 
 ## Important reproducibility details
 
-### Random dataset selection
+### Dataset selection
 
-The datasets are **not selected alphabetically**. The script:
+If `--datasets` is supplied, `ablation.py` uses exactly that explicit list.
 
-1. lists all datasets in the chosen Feynman variant,
-2. shuffles them with `--dataset_select_seed`,
-3. takes the first `--max_datasets` datasets.
+Otherwise, it:
 
-This means dataset selection is:
-
-- **random**
-- **without replacement**
-- **fully reproducible** if `--dataset_select_seed` is fixed.
+1. lists datasets in the selected Feynman variant
+2. shuffles them using `--dataset_select_seed`
+3. takes the first `--max_datasets`
 
 ### Per-run randomness
 
 The OFAT `seed` factor controls:
 
-- model initialization,
-- NumPy random state,
-- and, when `--split_strategy random` is used, the train/test split.
+- model initialization
+- NumPy random state
+- and, when `--split_strategy random` is used, the train/test split
 
-So reproducibility requires fixing both:
+To make results reproducible, fix both:
 
-- the dataset-selection seed: `--dataset_select_seed`
-- the OFAT seed grid: `--seed_grid`
+- `--dataset_select_seed`
+- `--seed_grid`
 
 ---
 
 ## Output format
 
-The script writes **one CSV row per method-run**.
+`ablation.py` writes **one CSV row per method-run**.
 
-Each row includes, among other fields:
+Each row includes configuration and result fields such as:
 
 - dataset name
+- filename
+- target formula (when available)
 - method name
 - OFAT factor
 - seed
@@ -169,9 +293,9 @@ Each row includes, among other fields:
 - train MSE
 - test MSE
 - predicted symbolic formula
-- timing information (if enabled)
+- timing information when enabled
 
-If a run fails, the script still appends a row containing the configuration and an `error` field. This is important for transparent reporting of unavailable runs.
+If a run fails, the script still appends a row with the configuration and an `error` field. This is intentional and should be preserved for transparent reporting.
 
 ---
 
@@ -179,17 +303,18 @@ If a run fails, the script still appends a row containing the configuration and 
 
 ### Data and dataset selection
 
-- `--feynman_root` — root dataset directory
-- `--feynman_variant` — dataset variant, e.g. `Feynman_with_units`
-- `--equations_csv` — optional equation metadata CSV
-- `--max_datasets` — how many datasets to use
-- `--dataset_select_seed` — random seed controlling dataset subset selection
+- `--feynman_root`
+- `--feynman_variant`
+- `--equations_csv`
+- `--datasets`
+- `--max_datasets`
+- `--dataset_select_seed`
 
 ### Sampling
 
-- `--train_num` — max number of training samples per dataset
-- `--test_num` — max number of test samples per dataset
-- `--split_strategy` — `random` or `linspace`
+- `--train_num`
+- `--test_num`
+- `--split_strategy`
 
 ### Device
 
@@ -229,78 +354,8 @@ If a run fails, the script still appends a row containing the configuration and 
 ### Output
 
 - `--output_csv`
-- `--append / --no-append`
 - `--timing / --no-timing`
 - `--simplify / --no-simplify`
-
----
-
-## Reproducing the paper run
-
-To make runs reproducible, keep the following fixed:
-
-1. the code version / commit,
-2. the Python environment,
-3. the dataset files,
-4. `--dataset_select_seed`,
-5. all OFAT grids,
-6. the device type,
-7. the output of failed runs as well as successful runs.
-
-To reproduce exactly the paper results, run:
-
-```bash
-python ablation.py \
-  --feynman_root symbolic_kan/datasets \
-  --feynman_variant Feynman_with_units \
-  --equations_csv symbolic_kan/datasets/FeynmanEquations.csv \
-  --device mps \
-  --output_csv results/ablation_ofat_paper10.csv \
-  --datasets \
-    feynman_I_9_18 \
-    feynman_I_10_7 \
-    feynman_I_12_1 \
-    feynman_I_12_4 \
-    feynman_I_13_4 \
-    feynman_I_34_1 \
-    feynman_II_6_15a \
-    feynman_II_6_15b \
-    feynman_II_21_32 \
-    feynman_II_34_29a
-  --append
-```
-
-For CPU, replace:
-
-```bash
---device mps
-```
-
-with:
-
-```bash
---device cpu
-```
-
-For CUDA, replace it with:
-
-```bash
---device cuda
-```
-
-If you want a random but reproducible subset instead of an explicit list:
-
-```bash
-python ablation.py \
-  --feynman_root symbolic_kan/datasets \
-  --feynman_variant Feynman_with_units \
-  --equations_csv symbolic_kan/datasets/FeynmanEquations.csv \
-  --device mps \
-  --output_csv results/ablation_random_10ds.csv \
-  --max_datasets 10 \
-  --dataset_select_seed 123 \
-  --append
-```
 
 ---
 
@@ -310,8 +365,8 @@ The CSV generated by `ablation.py` contains the raw runs used for the paper anal
 
 In the paper:
 
-- **seed sensitivity** is computed from the rows where `ofat_factor = seed`, using the fixed reference configuration,
-- **OFAT sensitivity** is computed by aggregating rows where `ofat_factor ∈ {width_mid, lamb, prune_iters}`.
+- **seed sensitivity** is computed from rows where `ofat_factor = seed`, while all other hyperparameters stay at the reference configuration
+- **OFAT sensitivity** is computed by aggregating rows where `ofat_factor ∈ {width_mid, lamb, prune_iters}`
 
 These are different summaries and should not be interpreted as the same quantity.
 
@@ -321,11 +376,18 @@ These are different summaries and should not be interpreted as the same quantity
 
 ### No datasets found
 
-Check that the selected variant exists, for example:
+Check that this directory exists:
 
 ```text
 symbolic_kan/datasets/Feynman_with_units/
 ```
+
+### `FeynmanEquations.csv` not found
+
+Either:
+
+- place it at `symbolic_kan/datasets/FeynmanEquations.csv`, or
+- pass its path explicitly with `--equations_csv`
 
 ### Wrong Torch build
 
@@ -333,7 +395,7 @@ Install the correct PyTorch wheel for your platform first, then reinstall the re
 
 ### Long runtime
 
-This pipeline is intentionally large. To reduce runtime for quick tests:
+This pipeline is intentionally large. For quick tests:
 
 - lower `--max_datasets`
 - reduce `--steps`
@@ -342,21 +404,24 @@ This pipeline is intentionally large. To reduce runtime for quick tests:
 
 ### Interrupted runs
 
-The script appends rows progressively. If interrupted, previously completed runs remain stored in the CSV.
+The script appends rows progressively. If interrupted, previously completed runs remain in the CSV.
 
 ---
 
-## Optional demos
+## Citation
 
-These are not part of the paper pipeline, but remain useful for quick sanity checks:
+If you use this repository, please cite the associated paper. A BibTeX entry is provided below.
 
-```bash
-python example_simple.py
-python example_logical_features.py --simplify
+```bibtex
+@inproceedings{sovrano2026incontext,
+  author    = {Francesco Sovrano and Lidia Losavio and Giulia Vilone and Marc Langheinrich},
+  title     = {In-Context Symbolic Regression for Robustness-Improved Kolmogorov-Arnold Networks},
+  booktitle = {eXplainable Artificial Intelligence. 4th World Conference on eXplainable Artificial Intelligence},
+  year      = {2026},
+  series    = {Communications in Computer and Information Science},
+  publisher = {Springer},
+  url       = {https://xaiworldconference.com/2026/}
+}
 ```
 
----
-
-## Citation / paper context
-
-This codebase supports the experiments reported in the KAN symbolic regression paper, including the robustness analysis based on OFAT sweeps and seed sensitivity.
+If you also discuss the benchmark origin, cite the original AI Feynman work and the Feynman Symbolic Regression Database used to distribute the datasets.
